@@ -1,4 +1,3 @@
-#include <sqlite3.h>
 #include <ncurses.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1178,52 +1177,7 @@ void showGameMenu(WINDOW *menu_win) {
                 }
                 break;
 
-            case 2: // Resume Game
-                {
-                    sqlite3 *db;
-                    sqlite3_stmt *res;
-                    
-                    // Check if save exists
-                    int rc = sqlite3_open("game.db", &db);
-                    if (rc == SQLITE_OK) {
-                        const char *sql = "SELECT COUNT(*) FROM save_state WHERE id = 1;";
-                        rc = sqlite3_prepare_v2(db, sql, -1, &res, 0);
-                        
-                        if (rc == SQLITE_OK && sqlite3_step(res) == SQLITE_ROW) {
-                            int count = sqlite3_column_int(res, 0);
-                            sqlite3_finalize(res);
-                            sqlite3_close(db);
-                            
-                            if (count > 0) {
-                                clear();
-                                refresh();
-                                endwin();
-                                system("clear");
-
-                                // Clean way to launch saved game
-                                char *args[] = {"./Map", "load", NULL};
-                                execv("./Map", args);
-
-                                // If execv fails, restore ncurses
-                                initscr();
-                                noecho();
-                                cbreak();
-                                curs_set(0);
-                                keypad(stdscr, TRUE);
-                                clear();
-                                refresh();
-                                break;
-                            }
-                        }
-                        sqlite3_close(db);
-                    }
-                    
-                    // If we get here, no save file was found
-                    mvprintw(LINES/2, (COLS-22)/2, "No saved game found!");
-                    refresh();
-                    napms(2000);
-                }
-                break;
+                case 2:
                 case 3:
                     // Game Settings logic
                     show_game_settings(menu_win);
