@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <signal.h>
+#include <stdint.h>
 #include <time.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -138,7 +139,7 @@ void display_menu(WINDOW *menu_win, int highlight) {
     int max_len = 0;
 
     // Draw fancy border
-    wattron(menu_win, COLOR_PAIR(5));
+    wattron(menu_win, COLOR_PAIR(1));
     
     // Top border
     mvwprintw(menu_win, 0, 0, "╔");
@@ -159,7 +160,7 @@ void display_menu(WINDOW *menu_win, int highlight) {
         mvwprintw(menu_win, height - 1, i, "═");
     }
     mvwprintw(menu_win, height - 1, width - 1, "╝");
-    wattroff(menu_win, COLOR_PAIR(5));
+    wattroff(menu_win, COLOR_PAIR(1));
 
     // Keep your original menu content
     for (int i = 0; i < MENU_SIZE; i++) {
@@ -331,7 +332,7 @@ void create_account(WINDOW *menu_win) {
 
     while (1) {
         werase(menu_win);
-        wattron(menu_win, COLOR_PAIR(5));
+        wattron(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 0, 0, "╔");
         for (int i = 1; i < width - 1; i++) {
             mvwprintw(menu_win, 0, i, "═");
@@ -346,7 +347,7 @@ void create_account(WINDOW *menu_win) {
             mvwprintw(menu_win, height - 1, i, "═");
         }
         mvwprintw(menu_win, height - 1, width - 1, "╝");
-        wattroff(menu_win, COLOR_PAIR(5));
+        wattroff(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 1, (width - strlen("Create Account")) / 2, "Create Account");
         mvwprintw(menu_win, base_y + 5, (width - strlen("Press Tab to generate a random password.")) / 2, "Press Tab to generate a random password.");
         
@@ -682,7 +683,7 @@ void login_menu(WINDOW *menu_win) {
     while (!logged_in && !forgot_password_selected) {
         werase(menu_win);
         werase(menu_win);
-        wattron(menu_win, COLOR_PAIR(5));
+        wattron(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 0, 0, "╔");
         for (int i = 1; i < width - 1; i++) {
             mvwprintw(menu_win, 0, i, "═");
@@ -697,7 +698,7 @@ void login_menu(WINDOW *menu_win) {
             mvwprintw(menu_win, height - 1, i, "═");
         }
         mvwprintw(menu_win, height - 1, width - 1, "╝");
-        wattroff(menu_win, COLOR_PAIR(5));
+        wattroff(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 1, (width - strlen("Login Menu")) / 2, "Login Menu");
         mvwprintw(menu_win, 7, (width - strlen("Press ↓ Arrow for Forgot Password")) / 2, "Press ↓ Arrow for Forgot Password"); // Added instruction
         wrefresh(menu_win);
@@ -970,7 +971,7 @@ void display_game_menu(WINDOW *menu_win, int highlight) {
 
     x = (width - max_len) / 2;
     werase(menu_win);
-    wattron(menu_win, COLOR_PAIR(5));
+    wattron(menu_win, COLOR_PAIR(1));
     mvwprintw(menu_win, 0, 0, "╔");
     for (int i = 1; i < width - 1; i++) {
         mvwprintw(menu_win, 0, i, "═");
@@ -985,7 +986,7 @@ void display_game_menu(WINDOW *menu_win, int highlight) {
         mvwprintw(menu_win, height - 1, i, "═");
     }
     mvwprintw(menu_win, height - 1, width - 1, "╝");
-    wattroff(menu_win, COLOR_PAIR(5));
+    wattroff(menu_win, COLOR_PAIR(1));
     mvwprintw(menu_win, 1, 2, "User: ");
     wattron(menu_win, COLOR_PAIR(4) | A_BOLD);
     wprintw(menu_win, "%s", current_user);
@@ -1052,7 +1053,7 @@ void show_game_settings(WINDOW *menu_win) {
     while (1) {
         werase(menu_win);
         werase(menu_win);
-        wattron(menu_win, COLOR_PAIR(5));
+        wattron(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 0, 0, "╔");
         for (int i = 1; i < width - 1; i++) {
             mvwprintw(menu_win, 0, i, "═");
@@ -1067,7 +1068,7 @@ void show_game_settings(WINDOW *menu_win) {
             mvwprintw(menu_win, height - 1, i, "═");
         }
         mvwprintw(menu_win, height - 1, width - 1, "╝");
-        wattroff(menu_win, COLOR_PAIR(5));
+        wattroff(menu_win, COLOR_PAIR(1));
         
         // Title
         mvwprintw(menu_win, 1, (width - strlen("Game Settings")) / 2, "Game Settings");
@@ -1120,7 +1121,7 @@ void showGameMenu(WINDOW *menu_win) {
     while (1) {
         werase(menu_win);
         werase(menu_win);
-        wattron(menu_win, COLOR_PAIR(5));
+        wattron(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 0, 0, "╔");
         for (int i = 1; i < width - 1; i++) {
             mvwprintw(menu_win, 0, i, "═");
@@ -1135,7 +1136,7 @@ void showGameMenu(WINDOW *menu_win) {
             mvwprintw(menu_win, height - 1, i, "═");
         }
         mvwprintw(menu_win, height - 1, width - 1, "╝");
-        wattroff(menu_win, COLOR_PAIR(5));
+        wattroff(menu_win, COLOR_PAIR(1));
         display_game_menu(menu_win, highlight);
         c = wgetch(menu_win);
 
@@ -1155,29 +1156,46 @@ void showGameMenu(WINDOW *menu_win) {
 
         if (choice != 0) {
             switch (choice) {
-            case 1: // New Game
+                case 1: // New Game
                 {
                     clear();
                     refresh();
                     endwin();
                     system("clear");
-
-                    // Clean way to launch new game
-                    char *args[] = {"./Map", "new", NULL};
+                    remove("savegame.json");  // Remove existing save
+                    char *args[] = {"./Map", NULL};
                     execv("./Map", args);
-
-                    // If execv fails, restore ncurses
-                    initscr();
-                    noecho();
-                    cbreak();
-                    curs_set(0);
-                    keypad(stdscr, TRUE);
-                    clear();
-                    refresh();
+                    fprintf(stderr, "Failed to start new game\n");
+                    exit(1);
                 }
                 break;
 
-                case 2:
+                case 2: // Resume Game
+                {
+                    // First check if save file exists
+                    FILE *test = fopen("savegame.json", "r");
+                    if (test == NULL) {
+                        mvprintw(LINES/2, (COLS-30)/2, "No saved game found!");
+                        refresh();
+                        napms(2000);  // Show message for 2 seconds
+                        break;
+                    }
+                    fclose(test);
+                    
+                    clear();
+                    refresh();
+                    endwin();
+                    system("clear");
+                    
+                    // Start Map with a special flag to indicate it should wait for 'L'
+                    char *args[] = {"./Map", "resume_wait", NULL};
+                    execv("./Map", args);
+                    
+                    // In case execv fails
+                    fprintf(stderr, "Failed to resume game\n");
+                    exit(1);
+                }
+                break;
                 case 3:
                     // Game Settings logic
                     show_game_settings(menu_win);
@@ -1228,7 +1246,7 @@ void show_character_color_settings(WINDOW *menu_win) {
     while (1) {
         werase(menu_win);
         werase(menu_win);
-        wattron(menu_win, COLOR_PAIR(5));
+        wattron(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 0, 0, "╔");
         for (int i = 1; i < width - 1; i++) {
             mvwprintw(menu_win, 0, i, "═");
@@ -1243,7 +1261,7 @@ void show_character_color_settings(WINDOW *menu_win) {
             mvwprintw(menu_win, height - 1, i, "═");
         }
         mvwprintw(menu_win, height - 1, width - 1, "╝");
-        wattroff(menu_win, COLOR_PAIR(5));
+        wattroff(menu_win, COLOR_PAIR(1));
         
         // Title
         mvwprintw(menu_win, 1, (width - strlen("Character Color Settings")) / 2, "Character Color Settings");
@@ -1343,10 +1361,33 @@ int get_character_color() {
 void showProfileMenu(WINDOW *menu_win) {
     int height, width;
     getmaxyx(stdscr, height, width);
-    int y = 3;
 
+    // Calculate box dimensions for centering
+    int box_width = 60;  // Fixed width for our content boxes
+    int box_start_x = (width - box_width) / 2;  // Center horizontally
+    int y = height / 4;  // Start from 1/4 of screen height
+
+    // Main window box
     werase(menu_win);
     wattron(menu_win, COLOR_PAIR(5));
+    box(menu_win, 0, 0);
+    mvwhline(menu_win, 2, 1, ACS_HLINE, width - 2);  // Separator line under title
+    wattroff(menu_win, COLOR_PAIR(5));
+
+    // Title centered at top
+    wattron(menu_win, COLOR_PAIR(2) | A_BOLD);
+    mvwprintw(menu_win, 1, (width - strlen("Profile Menu")) / 2, "Profile Menu");
+    wattroff(menu_win, COLOR_PAIR(2) | A_BOLD);
+
+    if (strcmp(current_user, "") == 0) {
+        mvwprintw(menu_win, y, (width - strlen("Please log in to view your profile.")) / 2, 
+                  "Please log in to view your profile.");
+        wrefresh(menu_win);
+        wgetch(menu_win);
+        return;
+    }
+    werase(menu_win);
+    wattron(menu_win, COLOR_PAIR(1));
     mvwprintw(menu_win, 0, 0, "╔");
     for (int i = 1; i < width - 1; i++) {
         mvwprintw(menu_win, 0, i, "═");
@@ -1361,21 +1402,180 @@ void showProfileMenu(WINDOW *menu_win) {
         mvwprintw(menu_win, height - 1, i, "═");
     }
     mvwprintw(menu_win, height - 1, width - 1, "╝");
-    wattroff(menu_win, COLOR_PAIR(5));
+    wattroff(menu_win, COLOR_PAIR(1));
+
+    // Title with fancy border
+    wattron(menu_win, COLOR_PAIR(2) | A_BOLD);
     mvwprintw(menu_win, 1, (width - strlen("Profile Menu")) / 2, "Profile Menu");
+    wattroff(menu_win, COLOR_PAIR(2) | A_BOLD);
 
     if (strcmp(current_user, "") == 0) {
-        mvwprintw(menu_win, y, (width - strlen("Please log in to view your profile.")) / 2, "Please log in to view your profile.");
+        mvwprintw(menu_win, y, (width - strlen("Please log in to view your profile.")) / 2, 
+                  "Please log in to view your profile.");
         wrefresh(menu_win);
         wgetch(menu_win);
         return;
     }
-    mvwprintw(menu_win, y, (width - strlen("Username :")) / 2 - 15, "Username :");
-    mvwprintw(menu_win, y, (width - strlen("Username :")) / 2, "%s", current_user);
-    y++;
-    mvwprintw(menu_win, y, (width - strlen("Email :")) / 2 - 15, "Email :");
-    mvwprintw(menu_win, y, (width - strlen("Email :")) / 2, "%s", current_email);
-    y++;
+    // Read user data from file
+    FILE *user_data = fopen("user_data.txt", "r");
+    char username[100] = "", password[100] = "", email[100] = "";
+    char line[256];
+    int found_user = 0;
+    
+    if (user_data) {
+        while (fgets(line, sizeof(line), user_data)) {
+            if (strncmp(line, "Username: ", 10) == 0) {
+                char temp_user[100];
+                strcpy(temp_user, line + 10);
+                temp_user[strcspn(temp_user, "\n")] = 0;
+                
+                // If this is our user, get their data
+                if (strcmp(temp_user, current_user) == 0) {
+                    strcpy(username, temp_user);
+                    
+                    // Get password
+                    if (fgets(line, sizeof(line), user_data)) {
+                        if (strncmp(line, "Password: ", 10) == 0) {
+                            strcpy(password, line + 10);
+                            password[strcspn(password, "\n")] = 0;
+                        }
+                    }
+                    
+                    // Get email
+                    if (fgets(line, sizeof(line), user_data)) {
+                        if (strncmp(line, "Email: ", 7) == 0) {
+                            strcpy(email, line + 7);
+                            email[strcspn(email, "\n")] = 0;
+                        }
+                    }
+                    
+                    found_user = 1;
+                    break;
+                }
+            }
+        }
+        fclose(user_data);
+    }
+
+    // Read user score from file
+    FILE *user_score = fopen("user_score.txt", "r");
+    int level = 0, hit = 0, strength = 0, gold = 0, armor = 0, exp = 0, games = 0;
+    int found_score = 0;
+    
+    if (user_score) {
+        while (fgets(line, sizeof(line), user_score)) {
+            if (strncmp(line, "Username: ", 10) == 0) {
+                char temp_user[100];
+                strcpy(temp_user, line + 10);
+                temp_user[strcspn(temp_user, "\n")] = 0;
+                
+                // If this is our user, get their stats
+                if (strcmp(temp_user, current_user) == 0) {
+                    while (fgets(line, sizeof(line), user_score)) {
+                        if (line[0] == '\n' || strncmp(line, "Username:", 9) == 0) break;
+                        
+                        if (strstr(line, "Level: ")) sscanf(line, "Level: %d", &level);
+                        else if (strstr(line, "Hit: ")) sscanf(line, "Hit: %d", &hit);
+                        else if (strstr(line, "Strength: ")) sscanf(line, "Strength: %d", &strength);
+                        else if (strstr(line, "Gold: ")) sscanf(line, "Gold: %d", &gold);
+                        else if (strstr(line, "Armor: ")) sscanf(line, "Armor: %d", &armor);
+                        else if (strstr(line, "Exp: ")) sscanf(line, "Exp: %d", &exp);
+                        else if (strstr(line, "Games Played: ")) sscanf(line, "Games Played: %d", &games);
+                    }
+                    found_score = 1;
+                    break;
+                }
+            }
+        }
+        fclose(user_score);
+    }
+
+    wattron(menu_win, COLOR_PAIR(3));
+    mvwprintw(menu_win, y, box_start_x, "╔════════════ User Information ════════════╗");
+    for(int i = 1; i <= 4; i++) {
+        mvwprintw(menu_win, y+i, box_start_x, "║");
+    }
+    mvwprintw(menu_win, y+4, box_start_x, "╚══════════════════════════════════════════╝");
+    wattroff(menu_win, COLOR_PAIR(3));
+
+    // User info content
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+1, box_start_x + 2, "Username  : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    wprintw(menu_win, "%s", username);
+    
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+2, box_start_x + 2, "Email     : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    wprintw(menu_win, "%s", email);
+    
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+3, box_start_x + 2, "Password  : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    char masked_pass[100] = "";
+    for (int i = 0; i < strlen(password); i++) masked_pass[i] = '*';
+    wprintw(menu_win, "%s", masked_pass);
+    wattroff(menu_win, COLOR_PAIR(1) | A_BOLD);
+
+    // Game Statistics Box
+    y += 6;  // Space between boxes
+    wattron(menu_win, COLOR_PAIR(4));
+    mvwprintw(menu_win, y, box_start_x, "╔════════════ Game Statistics ════════════╗");
+    for(int i = 1; i <= 8; i++) {
+        mvwprintw(menu_win, y+i, box_start_x, "║");
+    }
+    mvwprintw(menu_win, y+8, box_start_x, "╚══════════════════════════════════════════╝");
+    wattroff(menu_win, COLOR_PAIR(4));
+
+    // Stats content
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+1, box_start_x + 2, "⚔  Level        : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    wprintw(menu_win, "%d", level);
+    
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+2, box_start_x + 2, "♥  Hit Points   : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    wprintw(menu_win, "%d", hit);
+    
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+3, box_start_x + 2, "⚡ Strength     : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    wprintw(menu_win, "%d", strength);
+    
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+4, box_start_x + 2, "$ Gold         : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    wprintw(menu_win, "%d", gold);
+    
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+5, box_start_x + 2, "🛡  Armor        : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    wprintw(menu_win, "%d", armor);
+    
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+6, box_start_x + 2, "✨ Experience   : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    wprintw(menu_win, "%d", exp);
+    
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, y+7, box_start_x + 2, "🎮 Games Played : ");
+    wattron(menu_win, COLOR_PAIR(1) | A_BOLD);
+    wprintw(menu_win, "%d", games);
+    wattroff(menu_win, COLOR_PAIR(1) | A_BOLD);
+
+    // Current date/time and login info at bottom
+    y = height - 4;
+    wattron(menu_win, COLOR_PAIR(5));
+    mvwprintw(menu_win, y, (width - strlen("Current User:")) / 2 - 5, "Current User: %s", current_user);
+    mvwprintw(menu_win, y+1, (width - strlen("Date/Time:")) / 2 - 10, "Date/Time: %s", "2025-02-05 11:00:00");
+    wattroff(menu_win, COLOR_PAIR(5));
+
+    // Bottom instruction
+    wattron(menu_win, COLOR_PAIR(3) | A_BOLD);
+    mvwprintw(menu_win, height-2, (width - strlen("Press any key to return")) / 2, 
+              "Press any key to return");
+    wattroff(menu_win, COLOR_PAIR(3) | A_BOLD);
 
     wrefresh(menu_win);
     wgetch(menu_win);
@@ -1496,7 +1696,7 @@ void show_music_settings(WINDOW *menu_win) {
     while (1) {
         getmaxyx(stdscr, height, width);
         werase(menu_win);
-        wattron(menu_win, COLOR_PAIR(5));
+        wattron(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 0, 0, "╔");
         for (int i = 1; i < width - 1; i++) {
             mvwprintw(menu_win, 0, i, "═");
@@ -1511,7 +1711,7 @@ void show_music_settings(WINDOW *menu_win) {
             mvwprintw(menu_win, height - 1, i, "═");
         }
         mvwprintw(menu_win, height - 1, width - 1, "╝");
-        wattroff(menu_win, COLOR_PAIR(5));
+        wattroff(menu_win, COLOR_PAIR(1));
 
         // Title
         mvwprintw(menu_win, 1, (width - strlen("Music Settings")) / 2, "Music Settings");
@@ -1644,7 +1844,7 @@ void showLeaderboardMenu(WINDOW *menu_win) {
 
     while (1) {
         werase(menu_win);
-        wattron(menu_win, COLOR_PAIR(5));
+        wattron(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 0, 0, "╔");
         for (int i = 1; i < width - 1; i++) {
             mvwprintw(menu_win, 0, i, "═");
@@ -1659,7 +1859,7 @@ void showLeaderboardMenu(WINDOW *menu_win) {
             mvwprintw(menu_win, height - 1, i, "═");
         }
         mvwprintw(menu_win, height - 1, width - 1, "╝");
-        wattroff(menu_win, COLOR_PAIR(5));
+        wattroff(menu_win, COLOR_PAIR(1));
         mvwprintw(menu_win, 1, (width - strlen("LEADERBOARD")) / 2, "LEADERBOARD");
         mvwprintw(menu_win, 2, 2, "Logged in as: ");
         wattron(menu_win, COLOR_PAIR(4) | A_BOLD);

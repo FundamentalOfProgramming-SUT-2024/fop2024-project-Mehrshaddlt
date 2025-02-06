@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <string.h>
 #include <locale.h>
+#include <sqlite3.h>
 #define MAXROOMS 9
 #define MIN_ROOM_SIZE 6
 #define MAX_ROOM_SIZE 10
@@ -16,15 +17,22 @@
 #define MESSAGE_DURATION 5
 #define MAX_LEVELS 5 
 #define TREASURE_LEVEL 5
-
+#define DIFFICULTY_EASY 1
+#define DIFFICULTY_MEDIUM 2
+#define DIFFICULTY_HARD 3
 int NUMCOLS;
 int NUMLINES;
 char current_username[50] = "";
 static bool fast_travel_mode = false;
-
+int difficulty;
 typedef struct {
     int x, y;
 } Coord;
+typedef enum {
+    FOOD_NORMAL,
+    FOOD_FLASK_CERULEAN,
+    FOOD_FLASK_CRIMSON
+} FoodType;
 typedef enum {
     MONSTER_DEMON,
     MONSTER_FIRE,
@@ -45,6 +53,7 @@ typedef struct {
     bool aggressive; 
     bool was_attacked;
     bool immobilized;
+    bool in_arena;
 } Monster;
 typedef struct {
     Coord pos;     
@@ -80,10 +89,13 @@ typedef struct {
     const char* name;
     const char* symbol;
     int color;
-    bool owned;
-    int count;                
-    int active_durations[5];   
+    bool owned;          
+    int active_durations[5];  
+    bool is_active;      
+    int moves_remaining;    
+    int count; 
 } Talisman;
+
 typedef struct {
     Room rooms[MAXROOMS];
     Room secret_rooms[MAXROOMS];    
@@ -113,6 +125,12 @@ typedef struct {
     int talisman_type;
     Monster monsters[MONSTER_COUNT];
     int num_monsters;
+    Coord fighting_trap;
+    bool fighting_trap_triggered;
+    Coord return_pos;
+    bool in_fighting_room; 
+    int arena_monster_count;
+    Monster arena_monsters[3]; 
 } Level;
 
 typedef struct {
@@ -144,7 +162,16 @@ typedef struct {
     bool health_regen_doubled;
     bool damage_doubled;
     bool speed_doubled;
-    int active_talisman_count;
+    int moves_since_activation;
+    int food_freshness[5]; 
+    bool food_is_rotten[5];
+    FoodType food_types[5]; 
+    int moves_remaining;  
+    int normal_food;    
+    int crimson_flask;    
+    int cerulean_flask;      
+    int rotten_food;  
+    int difficulty;
 } Map;
 
 // Function declarations
@@ -185,17 +212,946 @@ void cast_magic_wand(Map *map, int dir_x, int dir_y);
 void shoot_arrow(Map *map, int dir_x, int dir_y);
 int calculate_damage(Map *map, int base_damage);
 void display_talisman_menu(WINDOW *win, Map *map);
+void update_talisman_effects(Map *map);
+void eat_food_from_slot(Map *map, int slot);
+void consume_food(Map *map, int type);
+int get_difficulty_from_settings();
+void create_fighting_room(Level *level);
+void play_background_music(const char* music_number);
 // Function delarations
+void init_database() {
+    sqlite3 *db;
+    char *err_msg = 0;
+    int rc = sqlite3_open("game_data.db", &db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return;
+    }
+    const char *sql = "CREATE TABLE IF NOT EXISTS user_stats ("
+                      "username TEXT PRIMARY KEY,"
+                      "level INTEGER,"
+                      "health INTEGER,"
+                      "strength INTEGER,"
+                      "gold INTEGER,"
+                      "armor INTEGER,"
+                      "exp INTEGER,"
+                      "games_played INTEGER,"
+                      "difficulty INTEGER,"
+                      "current_weapon INTEGER,"
+                      "normal_food INTEGER,"
+                      "crimson_flask INTEGER,"
+                      "cerulean_flask INTEGER"
+                      ");";
+    
+    rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
+    
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", err_msg);
+        sqlite3_free(err_msg);
+    }
+    sqlite3_close(db);
+}
+
+void save_to_database(Map* map) {
+    sqlite3 *db;
+    char *err_msg = 0;
+    int rc = sqlite3_open("game_data.db", &db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(db));
+        return;
+    }
+    char *sql = sqlite3_mprintf(
+        "INSERT OR REPLACE INTO user_stats "
+        "(username, level, health, strength, gold, armor, exp, games_played, "
+        "difficulty, current_weapon, normal_food, crimson_flask, cerulean_flask) "
+        "VALUES ('%q', %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d);",
+        current_username,
+        map->current_level,
+        map->health,
+        map->strength,
+        map->gold,
+        map->armor,
+        map->exp,
+        map->games_played + 1,
+        map->difficulty,
+        map->current_weapon,
+        map->normal_food,
+        map->crimson_flask,
+        map->cerulean_flask
+    );
+    rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", err_msg);
+        sqlite3_free(err_msg);
+    }
+    sqlite3_free(sql);
+    sqlite3_close(db);
+}
+
+void view_database() {
+    sqlite3 *db;
+    char *err_msg = 0;
+    int rc = sqlite3_open("game_data.db", &db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(db));
+        return;
+    }
+    const char *sql = "SELECT * FROM user_stats;";
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to fetch data: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return;
+    }
+    printf("\nDatabase Contents:\n");
+    printf("%-20s %-6s %-6s %-6s %-6s %-6s %-6s %-6s\n", 
+           "Username", "Level", "Health", "Str", "Gold", "Armor", "Exp", "Games");
+    printf("----------------------------------------------------------------\n");
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        printf("%-20s %-6d %-6d %-6d %-6d %-6d %-6d %-6d\n",
+               sqlite3_column_text(stmt, 0),  
+               sqlite3_column_int(stmt, 1),  
+               sqlite3_column_int(stmt, 2),  
+               sqlite3_column_int(stmt, 3),   
+               sqlite3_column_int(stmt, 4),   
+               sqlite3_column_int(stmt, 5),  
+               sqlite3_column_int(stmt, 6),
+               sqlite3_column_int(stmt, 7));
+    }
+    
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+}
+void play_background_music(const char* music_number) {
+    char command[256];
+    system("pkill mpg123 2>/dev/null");
+    snprintf(command, sizeof(command), "mpg123 -q -l 0 %s.mp3 &", music_number);
+    system(command);
+    clear();
+    refresh();
+    curs_set(0);
+}
+static char* get_current_time(void) {
+    static char buffer[26];
+    time_t timer = time(NULL);
+    struct tm* tm_info = localtime(&timer);
+    strftime(buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+    return buffer;
+}
+bool save_game_json(Map *map, const char *filename) {
+    FILE *file = fopen(filename, "w");
+    if (!file) return false;
+    fprintf(file, "{\n");
+    fprintf(file, "  \"metadata\": {\n");
+    fprintf(file, "    \"version\": 1,\n");
+    fprintf(file, "    \"username\": \"%s\",\n", current_username);
+    fprintf(file, "    \"save_date\": \"%s\"\n", get_current_time());
+    fprintf(file, "  },\n");
+    fprintf(file, "  \"player\": {\n");
+    fprintf(file, "    \"position\": {\"x\": %d, \"y\": %d},\n", map->player_x, map->player_y);
+    fprintf(file, "    \"current_level\": %d,\n", map->current_level);
+    fprintf(file, "    \"stats\": {\n");
+    fprintf(file, "      \"health\": %d,\n", map->health);
+    fprintf(file, "      \"strength\": %d,\n", map->strength);
+    fprintf(file, "      \"gold\": %d,\n", map->gold);
+    fprintf(file, "      \"armor\": %d,\n", map->armor);
+    fprintf(file, "      \"exp\": %d,\n", map->exp);
+    fprintf(file, "      \"hunger\": %d\n", map->hunger);
+    fprintf(file, "    },\n");
+    fprintf(file, "    \"weapons\": [\n");
+    for (int i = 0; i < WEAPON_COUNT; i++) {
+        fprintf(file, "      {\n");
+        fprintf(file, "        \"type\": %d,\n", map->weapons[i].type);
+        fprintf(file, "        \"owned\": %s,\n", map->weapons[i].owned ? "true" : "false");
+        fprintf(file, "        \"ammo\": %d\n", map->weapons[i].ammo);
+        fprintf(file, "      }%s\n", i < WEAPON_COUNT-1 ? "," : "");
+    }
+    fprintf(file, "    ],\n");
+    fprintf(file, "    \"talismans\": [\n");
+    for (int i = 0; i < TALISMAN_COUNT; i++) {
+        fprintf(file, "      {\n");
+        fprintf(file, "        \"type\": %d,\n", map->talismans[i].type);
+        fprintf(file, "        \"owned\": %s,\n", map->talismans[i].owned ? "true" : "false");
+        fprintf(file, "        \"count\": %d,\n", map->talismans[i].count);
+        fprintf(file, "        \"durations\": [");
+        for (int j = 0; j < 5; j++) {
+            fprintf(file, "%d%s", map->talismans[i].active_durations[j], j < 4 ? "," : "");
+        }
+        fprintf(file, "]\n");
+        fprintf(file, "      }%s\n", i < TALISMAN_COUNT-1 ? "," : "");
+    }
+    fprintf(file, "    ],\n");
+    fprintf(file, "    \"consumables\": {\n");
+    fprintf(file, "      \"normal_food\": %d,\n", map->normal_food);
+    fprintf(file, "      \"crimson_flask\": %d,\n", map->crimson_flask);
+    fprintf(file, "      \"cerulean_flask\": %d,\n", map->cerulean_flask);
+    fprintf(file, "      \"rotten_food\": %d\n", map->rotten_food);
+    fprintf(file, "    }\n");
+    fprintf(file, "  },\n");
+    fprintf(file, "  \"levels\": [\n");
+    for (int l = 0; l < map->current_level; l++) {
+        Level *level = &map->levels[l];
+        fprintf(file, "    {\n");
+        fprintf(file, "      \"level_number\": %d,\n", l + 1);
+        fprintf(file, "      \"level_data\": {\n");
+        fprintf(file, "        \"num_rooms\": %d,\n", level->num_rooms);
+        fprintf(file, "        \"num_secret_rooms\": %d,\n", level->num_secret_rooms);
+        fprintf(file, "        \"stairs_placed\": %s,\n", level->stairs_placed ? "true" : "false");
+        fprintf(file, "        \"stairs_up\": {\"x\": %d, \"y\": %d},\n", level->stairs_up.x, level->stairs_up.y);
+        fprintf(file, "        \"stairs_down\": {\"x\": %d, \"y\": %d},\n", level->stairs_down.x, level->stairs_down.y);
+        fprintf(file, "        \"stair_coords\": {\"x\": %d, \"y\": %d},\n", level->stair_x, level->stair_y);
+        fprintf(file, "        \"secret_entrance\": {\"x\": %d, \"y\": %d},\n", level->secret_entrance.x, level->secret_entrance.y);
+        fprintf(file, "        \"fighting_trap\": {\"x\": %d, \"y\": %d},\n", level->fighting_trap.x, level->fighting_trap.y);
+        fprintf(file, "        \"fighting_trap_triggered\": %s,\n", level->fighting_trap_triggered ? "true" : "false");
+        fprintf(file, "        \"in_fighting_room\": %s,\n", level->in_fighting_room ? "true" : "false");
+        fprintf(file, "        \"arena_monster_count\": %d,\n", level->arena_monster_count);
+        fprintf(file, "        \"talisman_type\": %d\n", level->talisman_type);
+        fprintf(file, "      },\n");
+        fprintf(file, "      \"rooms\": [\n");
+        for (int r = 0; r < level->num_rooms; r++) {
+            Room *room = &level->rooms[r];
+            fprintf(file, "        {\n");
+            fprintf(file, "          \"position\": {\"x\": %d, \"y\": %d},\n", room->pos.x, room->pos.y);
+            fprintf(file, "          \"size\": {\"x\": %d, \"y\": %d},\n", room->max.x, room->max.y);
+            fprintf(file, "          \"center\": {\"x\": %d, \"y\": %d},\n", room->center.x, room->center.y);
+            fprintf(file, "          \"gone\": %s,\n", room->gone ? "true" : "false");
+            fprintf(file, "          \"connected\": %s\n", room->connected ? "true" : "false");
+            fprintf(file, "        }%s\n", r < level->num_rooms-1 ? "," : "");
+        }
+        fprintf(file, "      ],\n");
+        fprintf(file, "      \"secret_rooms\": [\n");
+        for (int r = 0; r < level->num_secret_rooms; r++) {
+            Room *room = &level->secret_rooms[r];
+            fprintf(file, "        {\n");
+            fprintf(file, "          \"position\": {\"x\": %d, \"y\": %d},\n", room->pos.x, room->pos.y);
+            fprintf(file, "          \"size\": {\"x\": %d, \"y\": %d},\n", room->max.x, room->max.y);
+            fprintf(file, "          \"center\": {\"x\": %d, \"y\": %d},\n", room->center.x, room->center.y);
+            fprintf(file, "          \"gone\": %s,\n", room->gone ? "true" : "false");
+            fprintf(file, "          \"connected\": %s\n", room->connected ? "true" : "false");
+            fprintf(file, "        }%s\n", r < level->num_secret_rooms-1 ? "," : "");
+        }
+        fprintf(file, "      ],\n");
+        fprintf(file, "      \"monsters\": [\n");
+        for (int m = 0; m < MONSTER_COUNT; m++) {
+            Monster *monster = &level->monsters[m];
+            if (monster->active) {
+                fprintf(file, "        {\n");
+                fprintf(file, "          \"type\": %d,\n", monster->type);
+                fprintf(file, "          \"position\": {\"x\": %d, \"y\": %d},\n", monster->x, monster->y);
+                fprintf(file, "          \"health\": %d,\n", monster->health);
+                fprintf(file, "          \"max_health\": %d,\n", monster->max_health);
+                fprintf(file, "          \"aggressive\": %s,\n", monster->aggressive ? "true" : "false");
+                fprintf(file, "          \"was_attacked\": %s,\n", monster->was_attacked ? "true" : "false");
+                fprintf(file, "          \"immobilized\": %s,\n", monster->immobilized ? "true" : "false");
+                fprintf(file, "          \"in_arena\": %s\n", monster->in_arena ? "true" : "false");
+                fprintf(file, "        }%s\n", m < MONSTER_COUNT-1 ? "," : "");
+            }
+        }
+        fprintf(file, "      ],\n");
+        fprintf(file, "      \"tiles\": [\n");
+        for (int y = 0; y < NUMLINES; y++) {
+            fprintf(file, "        \"");
+            for (int x = 0; x < NUMCOLS; x++) {
+                if (level->tiles[y][x] == '\"' || level->tiles[y][x] == '\\') {
+                    fprintf(file, "\\%c", level->tiles[y][x]);
+                } else {
+                    fprintf(file, "%c", level->tiles[y][x]);
+                }
+            }
+            fprintf(file, "\"%s\n", y < NUMLINES-1 ? "," : "");
+        }
+        fprintf(file, "      ],\n");
+        fprintf(file, "      \"explored\": [\n");
+        for (int y = 0; y < NUMLINES; y++) {
+            fprintf(file, "        \"");
+            for (int x = 0; x < NUMCOLS; x++) {
+                fprintf(file, "%d", level->explored[y][x] ? 1 : 0);
+            }
+            fprintf(file, "\"%s\n", y < NUMLINES-1 ? "," : "");
+        }
+        fprintf(file, "      ],\n");
+        fprintf(file, "      \"visible_tiles\": [\n");
+        for (int y = 0; y < NUMLINES; y++) {
+            fprintf(file, "        \"");
+            for (int x = 0; x < NUMCOLS; x++) {
+                if (level->visible_tiles[y][x] == '\"' || level->visible_tiles[y][x] == '\\') {
+                    fprintf(file, "\\%c", level->visible_tiles[y][x]);
+                } else {
+                    fprintf(file, "%c", level->visible_tiles[y][x]);
+                }
+            }
+            fprintf(file, "\"%s\n", y < NUMLINES-1 ? "," : "");
+        }
+        fprintf(file, "      ]\n");
+        fprintf(file, "    }%s\n", l < map->current_level-1 ? "," : "");
+    }
+    fprintf(file, "  ]\n");
+    fprintf(file, "}\n");
+    fclose(file);
+    return true;
+}
+Map* load_game_json(const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        fprintf(stderr, "Could not open save file\n");
+        return NULL;
+    }
+    Map *map = create_map();
+    if (!map) {
+        fclose(file);
+        return NULL;
+    }
+    char line[1024];
+    char current_section[64] = "";
+    int level_index = -1;
+    int room_index = -1;
+    while (fgets(line, sizeof(line), file)) {
+        char *trimmed = line;
+        while (*trimmed == ' ' || *trimmed == '\t') trimmed++;
+
+        if (trimmed[0] == '\n' || trimmed[0] == '}' || trimmed[0] == ']') 
+            continue;
+
+        if (strstr(trimmed, "\"metadata\"") == trimmed) {
+            strcpy(current_section, "metadata");
+            continue;
+        }
+        if (strstr(trimmed, "\"player\"") == trimmed) {
+            strcpy(current_section, "player");
+            continue;
+        }
+        if (strstr(trimmed, "\"levels\"") == trimmed) {
+            strcpy(current_section, "levels");
+            continue;
+        }
+        if (strcmp(current_section, "player") == 0) {
+            if (strstr(trimmed, "\"position\"")) {
+                int x, y;
+                if (sscanf(trimmed, "\"position\": {\"x\": %d, \"y\": %d}", &x, &y) == 2) {
+                    map->player_x = x;
+                    map->player_y = y;
+                }
+            }
+            else if (strstr(trimmed, "\"current_level\"")) {
+                int level;
+                if (sscanf(trimmed, "\"current_level\": %d", &level) == 1) {
+                    map->current_level = level;
+                }
+            }
+            else if (strstr(trimmed, "\"health\"")) {
+                sscanf(trimmed, "\"health\": %d", &map->health);
+            }
+            else if (strstr(trimmed, "\"strength\"")) {
+                sscanf(trimmed, "\"strength\": %d", &map->strength);
+            }
+            else if (strstr(trimmed, "\"gold\"")) {
+                sscanf(trimmed, "\"gold\": %d", &map->gold);
+            }
+            else if (strstr(trimmed, "\"armor\"")) {
+                sscanf(trimmed, "\"armor\": %d", &map->armor);
+            }
+            else if (strstr(trimmed, "\"exp\"")) {
+                sscanf(trimmed, "\"exp\": %d", &map->exp);
+            }
+            else if (strstr(trimmed, "\"hunger\"")) {
+                sscanf(trimmed, "\"hunger\": %d", &map->hunger);
+            }
+        }
+        if (strcmp(current_section, "levels") == 0) {
+            if (strstr(trimmed, "\"level_number\"")) {
+                int num;
+                sscanf(trimmed, "\"level_number\": %d", &num);
+                level_index = num - 1;
+            }
+        }
+        if (strstr(trimmed, "\"level_data\"")) {
+            Level *current = &map->levels[level_index];
+            while (fgets(line, sizeof(line), file)) {
+                if (strstr(line, "}")) break;
+                
+                if (strstr(line, "\"num_rooms\"")) {
+                    sscanf(line, "\"num_rooms\": %d", &current->num_rooms);
+                }
+                else if (strstr(line, "\"num_secret_rooms\"")) {
+                    sscanf(line, "\"num_secret_rooms\": %d", &current->num_secret_rooms);
+                }
+                else if (strstr(line, "\"stairs_placed\"")) {
+                    current->stairs_placed = strstr(line, "true") != NULL;
+                }
+                else if (strstr(line, "\"stairs_up\"")) {
+                    sscanf(line, "\"stairs_up\": {\"x\": %d, \"y\": %d}", 
+                           &current->stairs_up.x, &current->stairs_up.y);
+                }
+                else if (strstr(line, "\"stairs_down\"")) {
+                    sscanf(line, "\"stairs_down\": {\"x\": %d, \"y\": %d}", 
+                           &current->stairs_down.x, &current->stairs_down.y);
+                }
+                else if (strstr(line, "\"stair_coords\"")) {
+                    sscanf(line, "\"stair_coords\": {\"x\": %d, \"y\": %d}", 
+                           &current->stair_x, &current->stair_y);
+                }
+                else if (strstr(line, "\"secret_entrance\"")) {
+                    sscanf(line, "\"secret_entrance\": {\"x\": %d, \"y\": %d}", 
+                           &current->secret_entrance.x, &current->secret_entrance.y);
+                }
+                else if (strstr(line, "\"fighting_trap\"")) {
+                    sscanf(line, "\"fighting_trap\": {\"x\": %d, \"y\": %d}", 
+                           &current->fighting_trap.x, &current->fighting_trap.y);
+                }
+                else if (strstr(line, "\"fighting_trap_triggered\"")) {
+                    current->fighting_trap_triggered = strstr(line, "true") != NULL;
+                }
+                else if (strstr(line, "\"in_fighting_room\"")) {
+                    current->in_fighting_room = strstr(line, "true") != NULL;
+                }
+                else if (strstr(line, "\"arena_monster_count\"")) {
+                    sscanf(line, "\"arena_monster_count\": %d", &current->arena_monster_count);
+                }
+                else if (strstr(line, "\"talisman_type\"")) {
+                    sscanf(line, "\"talisman_type\": %d", &current->talisman_type);
+                }
+            }
+        }
+        if (strstr(trimmed, "\"rooms\"") == trimmed) {
+            Level *current = &map->levels[level_index];
+            room_index = 0;
+            while (fgets(line, sizeof(line), file)) {
+                if (strstr(line, "]")) break;
+                if (strstr(line, "{")) {
+                    Room room = {0};
+                    while (fgets(line, sizeof(line), file)) {
+                        if (strstr(line, "}")) break;
+                        
+                        if (strstr(line, "\"position\"")) {
+                            sscanf(line, "\"position\": {\"x\": %d, \"y\": %d}", 
+                                   &room.pos.x, &room.pos.y);
+                        }
+                        else if (strstr(line, "\"size\"")) {
+                            sscanf(line, "\"size\": {\"x\": %d, \"y\": %d}", 
+                                   &room.max.x, &room.max.y);
+                        }
+                        else if (strstr(line, "\"center\"")) {
+                            sscanf(line, "\"center\": {\"x\": %d, \"y\": %d}", 
+                                   &room.center.x, &room.center.y);
+                        }
+                        else if (strstr(line, "\"gone\"")) {
+                            room.gone = strstr(line, "true") != NULL;
+                        }
+                        else if (strstr(line, "\"connected\"")) {
+                            room.connected = strstr(line, "true") != NULL;
+                        }
+                    }
+                    if (room_index < MAXROOMS) {
+                        current->rooms[room_index] = room;
+                        draw_room(current, &room);
+                        room_index++;
+                    }
+                }
+            }
+            for (int i = 1; i < room_index; i++) {
+                connect_rooms(current, &current->rooms[i-1], &current->rooms[i]);
+            }
+        }
+        if (strstr(trimmed, "\"secret_rooms\"") == trimmed) {
+            Level *current = &map->levels[level_index];
+            int secret_room_index = 0;
+            while (fgets(line, sizeof(line), file)) {
+                if (strstr(line, "]")) break;
+                if (strstr(line, "{")) {
+                    Room room = {0};
+                    while (fgets(line, sizeof(line), file)) {
+                        if (strstr(line, "}")) break;
+                        
+                        if (strstr(line, "\"position\"")) {
+                            sscanf(line, "\"position\": {\"x\": %d, \"y\": %d}", 
+                                   &room.pos.x, &room.pos.y);
+                        }
+                        else if (strstr(line, "\"size\"")) {
+                            sscanf(line, "\"size\": {\"x\": %d, \"y\": %d}", 
+                                   &room.max.x, &room.max.y);
+                        }
+                        else if (strstr(line, "\"center\"")) {
+                            sscanf(line, "\"center\": {\"x\": %d, \"y\": %d}", 
+                                   &room.center.x, &room.center.y);
+                        }
+                        else if (strstr(line, "\"gone\"")) {
+                            room.gone = strstr(line, "true") != NULL;
+                        }
+                        else if (strstr(line, "\"connected\"")) {
+                            room.connected = strstr(line, "true") != NULL;
+                        }
+                    }
+                    if (secret_room_index < MAXROOMS) {
+                        current->secret_rooms[secret_room_index] = room;
+                        secret_room_index++;
+                    }
+                }
+            }
+        }
+        if (strstr(trimmed, "\"weapons\"")) {
+            int weapon_index = -1;
+            while (fgets(line, sizeof(line), file)) {
+                if (strstr(line, "]")) break;
+                
+                if (strstr(line, "{")) {
+                    weapon_index++;
+                    continue;
+                }
+                
+                if (weapon_index >= 0 && weapon_index < WEAPON_COUNT) {
+                    int value;
+                    if (strstr(line, "\"type\"")) {
+                        if (sscanf(line, "%*[^:]: %d", &value) == 1) {
+                            map->weapons[weapon_index].type = value;
+                        }
+                    }
+                    else if (strstr(line, "\"owned\"")) {
+                        map->weapons[weapon_index].owned = strstr(line, "true") != NULL;
+                    }
+                    else if (strstr(line, "\"ammo\"")) {
+                        if (sscanf(line, "%*[^:]: %d", &value) == 1) {
+                            map->weapons[weapon_index].ammo = value;
+                        }
+                    }
+                }
+            }
+        }
+        if (strstr(trimmed, "\"talismans\"")) {
+            int talisman_index = -1;
+            while (fgets(line, sizeof(line), file)) {
+                if (strstr(line, "]")) break;
+                
+                if (strstr(line, "{")) {
+                    talisman_index++;
+                    continue;
+                }
+                if (talisman_index >= 0 && talisman_index < TALISMAN_COUNT) {
+                    int value;
+                    if (strstr(line, "\"type\"")) {
+                        if (sscanf(line, "%*[^:]: %d", &value) == 1) {
+                            map->talismans[talisman_index].type = value;
+                        }
+                    }
+                    else if (strstr(line, "\"owned\"")) {
+                        map->talismans[talisman_index].owned = strstr(line, "true") != NULL;
+                    }
+                    else if (strstr(line, "\"count\"")) {
+                        if (sscanf(line, "%*[^:]: %d", &value) == 1) {
+                            map->talismans[talisman_index].count = value;
+                        }
+                    }
+                    else if (strstr(line, "\"durations\"")) {
+                        char *start = strchr(line, '[');
+                        if (start) {
+                            start++;
+                            char *token = strtok(start, ",]");
+                            for (int i = 0; i < 5 && token; i++) {
+                                map->talismans[talisman_index].active_durations[i] = atoi(token);
+                                token = strtok(NULL, ",]");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (strstr(trimmed, "\"consumables\"")) {
+            while (fgets(line, sizeof(line), file)) {
+                if (strstr(line, "}")) break;
+                int value;
+                if (strstr(line, "\"normal_food\"")) {
+                    if (sscanf(line, "%*[^:]: %d", &value) == 1) {
+                        map->normal_food = value;
+                    }
+                }
+                else if (strstr(line, "\"crimson_flask\"")) {
+                    if (sscanf(line, "%*[^:]: %d", &value) == 1) {
+                        map->crimson_flask = value;
+                    }
+                }
+                else if (strstr(line, "\"cerulean_flask\"")) {
+                    if (sscanf(line, "%*[^:]: %d", &value) == 1) {
+                        map->cerulean_flask = value;
+                    }
+                }
+                else if (strstr(line, "\"rotten_food\"")) {
+                    if (sscanf(line, "%*[^:]: %d", &value) == 1) {
+                        map->rotten_food = value;
+                    }
+                }
+            }
+        }
+        if (strstr(trimmed, "\"monsters\"") == trimmed) {
+            Level *current = &map->levels[level_index];
+            while (fgets(line, sizeof(line), file)) {
+                if (strstr(line, "]")) break;
+                if (strstr(line, "{")) {
+                    Monster monster = {0};
+                    monster.active = true;
+                    while (fgets(line, sizeof(line), file)) {
+                        if (strstr(line, "}")) break;
+                        if (strstr(line, "\"type\"")) {
+                            int type;
+                            sscanf(line, "\"type\": %d", &type);
+                            monster.type = type;
+                        }
+                        else if (strstr(line, "\"position\"")) {
+                            sscanf(line, "\"position\": {\"x\": %d, \"y\": %d}", 
+                                   &monster.x, &monster.y);
+                        }
+                        else if (strstr(line, "\"health\"")) {
+                            sscanf(line, "\"health\": %d", &monster.health);
+                        }
+                        else if (strstr(line, "\"max_health\"")) {
+                            sscanf(line, "\"max_health\": %d", &monster.max_health);
+                        }
+                        else if (strstr(line, "\"aggressive\"")) {
+                            monster.aggressive = strstr(line, "true") != NULL;
+                        }
+                        else if (strstr(line, "\"was_attacked\"")) {
+                            monster.was_attacked = strstr(line, "true") != NULL;
+                        }
+                        else if (strstr(line, "\"immobilized\"")) {
+                            monster.immobilized = strstr(line, "true") != NULL;
+                        }
+                        else if (strstr(line, "\"in_arena\"")) {
+                            monster.in_arena = strstr(line, "true") != NULL;
+                        }
+                    }
+                    if (monster.type < MONSTER_COUNT) {
+                        current->monsters[monster.type] = monster;
+                        if (monster.active) {
+                            current->tiles[monster.y][monster.x] = monster.symbol;
+                        }
+                    }
+                }
+            }
+        }
+        if (strstr(trimmed, "\"tiles\"") == trimmed) {
+            Level *current = &map->levels[level_index];
+            int y = 0;
+            while (fgets(line, sizeof(line), file) && y < NUMLINES) {
+                if (strstr(line, "]")) break;
+                char *tile_data = strchr(line, '\"');
+                if (tile_data) {
+                    tile_data++;
+                    for (int x = 0; x < NUMCOLS && *tile_data && *tile_data != '\"'; x++) {
+                        if (*tile_data == '\\') tile_data++;
+                        current->tiles[y][x] = *tile_data++;
+                        if (current->tiles[y][x] == '$') {
+                            current->coins[y][x] = true;
+                            current->coin_values[y][x] = 1;
+                        }
+                        else if (current->tiles[y][x] == '&') {
+                            current->coins[y][x] = true;
+                            current->coin_values[y][x] = 5;
+                        }
+                        else if (current->tiles[y][x] == '<') {
+                            current->stairs_up.x = x;
+                            current->stairs_up.y = y;
+                        }
+                        else if (current->tiles[y][x] == '>') {
+                            current->stairs_down.x = x;
+                            current->stairs_down.y = y;
+                        }
+                    }
+                    y++;
+                }
+            }
+        }
+        if (strstr(trimmed, "\"explored\"") == trimmed) {
+            Level *current = &map->levels[level_index];
+            int y = 0;
+            while (fgets(line, sizeof(line), file) && y < NUMLINES) {
+                if (strstr(line, "]")) break;
+                char *explored_data = strchr(line, '\"');
+                if (explored_data) {
+                    explored_data++;
+                    for (int x = 0; x < NUMCOLS && *explored_data && *explored_data != '\"'; x++) {
+                        current->explored[y][x] = (*explored_data++ == '1');
+                    }
+                    y++;
+                }
+            }
+        }
+        if (strstr(trimmed, "\"visible_tiles\"") == trimmed) {
+            Level *current = &map->levels[level_index];
+            int y = 0;
+            while (fgets(line, sizeof(line), file) && y < NUMLINES) {
+                if (strstr(line, "]")) break;
+                char *tile_data = strchr(line, '\"');
+                if (tile_data) {
+                    tile_data++;
+                    for (int x = 0; x < NUMCOLS && *tile_data && *tile_data != '\"'; x++) {
+                        if (*tile_data == '\\') tile_data++;
+                        current->visible_tiles[y][x] = *tile_data++;
+                    }
+                    y++;
+                }
+            }
+        }
+    }
+    fclose(file);
+    for (int l = 0; l < map->current_level; l++) {
+        Level *current = &map->levels[l];
+        for (int r = 0; r < current->num_rooms; r++) {
+            Room *room = &current->rooms[r];
+            for (int y = room->pos.y; y < room->pos.y + room->max.y; y++) {
+                for (int x = room->pos.x; x < room->pos.x + room->max.x; x++) {
+                    if (y >= 0 && y < NUMLINES && x >= 0 && x < NUMCOLS) {
+                        current->explored[y][x] = true;
+                    }
+                }
+            }
+        }
+        if (l > 0) {
+            if (current->stairs_up.x > 0 && current->stairs_up.y > 0) {
+                current->tiles[current->stairs_up.y][current->stairs_up.x] = '<';
+            }
+        }
+        if (l < map->current_level - 1) {
+            if (current->stairs_down.x > 0 && current->stairs_down.y > 0) {
+                current->tiles[current->stairs_down.y][current->stairs_down.x] = '>';
+            }
+        }
+        if (current->stairs_up.x > 0 && current->stairs_up.y > 0) {
+            for (int y = current->stairs_up.y - 1; y <= current->stairs_up.y + 1; y++) {
+                for (int x = current->stairs_up.x - 1; x <= current->stairs_up.x + 1; x++) {
+                    if (y >= 0 && y < NUMLINES && x >= 0 && x < NUMCOLS) {
+                        current->explored[y][x] = true;
+                        current->visible_tiles[y][x] = current->tiles[y][x];
+                    }
+                }
+            }
+        }
+        if (current->stairs_down.x > 0 && current->stairs_down.y > 0) {
+            for (int y = current->stairs_down.y - 1; y <= current->stairs_down.y + 1; y++) {
+                for (int x = current->stairs_down.x - 1; x <= current->stairs_down.x + 1; x++) {
+                    if (y >= 0 && y < NUMLINES && x >= 0 && x < NUMCOLS) {
+                        current->explored[y][x] = true;
+                        current->visible_tiles[y][x] = current->tiles[y][x];
+                    }
+                }
+            }
+        }
+    }
+    update_visibility(map);
+    return map;
+}
+
+bool place_fighting_trap(Level *level, Room *room) {
+    for (int y = 0; y < NUMLINES; y++) {
+        for (int x = 0; x < NUMCOLS; x++) {
+            if (level->tiles[y][x] == 'v') {
+                return false;
+            }
+        }
+    }
+    if (rand() % 100 < 15) {
+        int attempts = 0;
+        const int MAX_ATTEMPTS = 50;
+        
+        while (attempts < MAX_ATTEMPTS) {
+            int trap_x = room->pos.x + 1 + (rand() % (room->max.x - 2));
+            int trap_y = room->pos.y + 1 + (rand() % (room->max.y - 2));
+            if (level->tiles[trap_y][trap_x] == '.' && 
+                !level->traps[trap_y][trap_x] && 
+                level->tiles[trap_y][trap_x] != '>' && 
+                level->tiles[trap_y][trap_x] != '<' &&
+                level->tiles[trap_y][trap_x] != '*' &&
+                level->tiles[trap_y][trap_x] != '$' &&
+                level->tiles[trap_y][trap_x] != '&') {
+                level->fighting_trap.x = trap_x;
+                level->fighting_trap.y = trap_y;
+                level->tiles[trap_y][trap_x] = '.';
+                level->fighting_trap_triggered = false;
+                return true;
+            }
+            attempts++;
+        }
+    }
+    return false;
+}
+void create_fighting_room(Level *level) {
+    for (int y = 0; y < NUMLINES; y++) {
+        for (int x = 0; x < NUMCOLS; x++) {
+            level->backup_tiles[y][x] = level->tiles[y][x];
+            level->backup_visible_tiles[y][x] = level->visible_tiles[y][x];
+            level->backup_explored[y][x] = level->explored[y][x];
+        }
+    }
+    for (int y = 0; y < NUMLINES; y++) {
+        for (int x = 0; x < NUMCOLS; x++) {
+            level->tiles[y][x] = ' ';
+            level->visible_tiles[y][x] = ' ';
+            level->explored[y][x] = false;
+        }
+    }
+    int room_width = 15;
+    int room_height = 10;
+    int start_x = (NUMCOLS - room_width) / 2;
+    int start_y = (NUMLINES - room_height) / 2;
+    for (int y = start_y; y < start_y + room_height; y++) {
+        for (int x = start_x; x < start_x + room_width; x++) {
+            if (y == start_y || y == start_y + room_height - 1)
+                level->tiles[y][x] = '_';
+            else if (x == start_x || x == start_x + room_width - 1)
+                level->tiles[y][x] = '|';
+            else
+                level->tiles[y][x] = '.';
+            
+            level->visible_tiles[y][x] = level->tiles[y][x];
+            level->explored[y][x] = true;
+        }
+    }
+    int entrance_x = start_x + (room_width / 2);
+    int entrance_y = start_y + 1;
+    level->arena_monster_count = 3;
+    for (int i = 0; i < MONSTER_COUNT; i++) {
+        level->monsters[i].in_arena = false;
+    }
+    for (int i = 0; i < 3; i++) {
+        Monster *snake = &level->monsters[i];
+        snake->type = MONSTER_SNAKE;
+        snake->active = true;
+        snake->aggressive = true;
+        snake->was_attacked = true;
+        snake->health = snake->max_health;
+        snake->immobilized = false;
+        snake->in_arena = true;
+        int tries = 0;
+        const int MAX_TRIES = 50;
+        bool position_found = false;
+        while (!position_found && tries < MAX_TRIES) {
+            snake->x = start_x + 1 + (rand() % (room_width - 2));
+            snake->y = start_y + 3 + (rand() % (room_height - 4));
+            if (level->tiles[snake->y][snake->x] == '.' && 
+                (abs(snake->x - entrance_x) > 2 || abs(snake->y - entrance_y) > 2)) {
+                bool space_occupied = false;
+                for (int j = 0; j < i; j++) {
+                    if (level->monsters[j].x == snake->x && 
+                        level->monsters[j].y == snake->y) {
+                        space_occupied = true;
+                        break;
+                    }
+                }
+                if (!space_occupied) {
+                    position_found = true;
+                    level->tiles[snake->y][snake->x] = 'S';
+                    level->visible_tiles[snake->y][snake->x] = 'S';
+                }
+            }
+            tries++;
+        }
+        if (!position_found) {
+            for (int y = start_y + 1; y < start_y + room_height - 1; y++) {
+                for (int x = start_x + 1; x < start_x + room_width - 1; x++) {
+                    if (level->tiles[y][x] == '.') {
+                        snake->x = x;
+                        snake->y = y;
+                        level->tiles[y][x] = 'S';
+                        level->visible_tiles[y][x] = 'S';
+                        position_found = true;
+                        break;
+                    }
+                }
+                if (position_found) break;
+            }
+        }
+    }
+    for (int y = start_y + 1; y < start_y + room_height - 1; y++) {
+        for (int x = start_x + 1; x < start_x + room_width - 1; x++) {
+            if (level->tiles[y][x] == '.' && rand() % 100 < 5) {
+                level->tiles[y][x] = 'O';
+                level->visible_tiles[y][x] = 'O';
+            }
+        }
+    }
+}
+void update_arena_monsters(Map *map) {
+    Level *current = &map->levels[map->current_level - 1];
+    if (!current->in_fighting_room) return;
+    bool all_defeated = true;
+    for (int i = 0; i < MONSTER_COUNT; i++) {
+        Monster *monster = &current->monsters[i];
+        if (monster->in_arena && monster->active) {
+            all_defeated = false;
+            int orig_x = monster->x;
+            int orig_y = monster->y;
+            int dx = 0, dy = 0;
+            if (monster->x < map->player_x) dx = 1;
+            else if (monster->x > map->player_x) dx = -1;
+            if (monster->y < map->player_y) dy = 1;
+            else if (monster->y > map->player_y) dy = -1;
+            int new_x = monster->x + dx;
+            int new_y = monster->y + dy;
+            if (current->tiles[new_y][new_x] == '.') {
+                monster->x = new_x;
+                monster->y = new_y;
+                current->tiles[orig_y][orig_x] = '.';
+                current->tiles[monster->y][monster->x] = 'S';
+                current->visible_tiles[orig_y][orig_x] = '.';
+                current->visible_tiles[monster->y][monster->x] = 'S';
+            }
+            if (abs(monster->x - map->player_x) <= 1 && 
+                abs(monster->y - map->player_y) <= 1) {
+                map->health -= monster->damage;
+                char msg[MAX_MESSAGE_LENGTH];
+                snprintf(msg, MAX_MESSAGE_LENGTH, 
+                        "Snake hits you for %d damage! (Your HP: %d)", 
+                        monster->damage, map->health);
+                set_message(map, msg);
+            }
+        }
+    }
+    if (all_defeated) {
+        for (int y = 0; y < NUMLINES; y++) {
+            for (int x = 0; x < NUMCOLS; x++) {
+                current->tiles[y][x] = current->backup_tiles[y][x];
+                current->visible_tiles[y][x] = current->backup_visible_tiles[y][x];
+                current->explored[y][x] = current->backup_explored[y][x];
+            }
+        }
+        map->player_x = current->return_pos.x;
+        map->player_y = current->return_pos.y;
+        current->tiles[current->fighting_trap.y][current->fighting_trap.x] = 'v';
+        current->visible_tiles[current->fighting_trap.y][current->fighting_trap.x] = 'v';
+        current->in_fighting_room = false;
+        //play_background_music("1");
+        map->exp += 50;
+        map->gold += 25;
+        set_message(map, "You've defeated all the snakes! You return to your previous position.");
+    }
+}
+int get_difficulty_from_settings() {
+    FILE *file = fopen("game_settings.txt", "r");
+    if (file == NULL) {
+        return DIFFICULTY_MEDIUM;
+    }
+
+    char line[256];
+    int difficulty = DIFFICULTY_MEDIUM;
+
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "Difficulty: ", 11) == 0) {
+            difficulty = atoi(line + 11);
+            break;
+        }
+    }
+
+    fclose(file);
+    return difficulty;
+}
 void display_talisman_menu(WINDOW *win, Map *map) {
     int center_y = NUMLINES / 2;
     int center_x = NUMCOLS / 2;
-    int box_width = 40;
-    int box_height = 12;
+    int box_width = 60;  
+    int box_height = 15;
     int start_y = center_y - (box_height / 2);
-    int start_x = center_x - (box_width / 2);
+    int start_x = center_x - (box_width / 2); 
     WINDOW *menu_win = newwin(box_height, box_width, start_y, start_x);
     wattron(menu_win, COLOR_PAIR(1));
-    box(menu_win, 0, 0);
     mvwprintw(menu_win, 0, 0, "╔");
     for (int i = 1; i < box_width - 1; i++) {
         mvwprintw(menu_win, 0, i, "═");
@@ -215,57 +1171,73 @@ void display_talisman_menu(WINDOW *win, Map *map) {
     wattroff(menu_win, COLOR_PAIR(1));
     wattron(menu_win, COLOR_PAIR(2));
     mvwprintw(menu_win, 1, 2, "Talisman Collection");
-    mvwprintw(menu_win, 2, 2, "Press 1-3 to use a talisman");
+    mvwprintw(menu_win, 2, 2, "Press 1-3 to activate a talisman");
+    mvwprintw(menu_win, 3, 2, "They Only work for 10 blocks");
     for (int i = 0; i < TALISMAN_COUNT; i++) {
+        bool is_active = false;
+        for (int j = 0; j < 5; j++) {
+            if (map->talismans[i].active_durations[j] > 0) {
+                is_active = true;
+                break;
+            }
+        }
         wattron(menu_win, map->talismans[i].color);
-        mvwprintw(menu_win, 4 + i * 2, 2, "%d: %s %s [%d owned]", 
+        mvwprintw(menu_win, 4 + i * 2, 2, "%d: %s %s [%s] (%d)", 
                   i + 1,
                   map->talismans[i].symbol,
                   map->talismans[i].name,
+                  map->talismans[i].owned ? (is_active ? "ACTIVE" : "READY") : "NOT FOUND",
                   map->talismans[i].count);
-        int active_count = 0;
-        for (int j = 0; j < 5; j++) {
-            if (map->talismans[i].active_durations[j] > 0) {
-                active_count++;
-            }
-        }
-        if (active_count > 0) {
-            mvwprintw(menu_win, 4 + i * 2 + 1, 4, "Active: %d talisman(s) - Effects:", active_count);
+        if (map->talismans[i].owned) {
+            mvwprintw(menu_win, 4 + i * 2 + 1, 4, "Effect: ");
             switch(i) {
                 case TALISMAN_HEALTH:
-                    wprintw(menu_win, " Double HP regen");
+                    wprintw(menu_win, "Double HP regeneration");
                     break;
                 case TALISMAN_DAMAGE:
-                    wprintw(menu_win, " Double damage");
+                    wprintw(menu_win, "Double damage dealt");
                     break;
                 case TALISMAN_SPEED:
-                    wprintw(menu_win, " Double movement");
+                    wprintw(menu_win, "Double movement speed");
                     break;
+            }
+            if (is_active) {
+                wprintw(menu_win, " (Active)");
             }
         }
         wattroff(menu_win, map->talismans[i].color);
     }
     wattron(menu_win, COLOR_PAIR(2));
-    mvwprintw(menu_win, box_height - 2, 2, "Press any key to close");
+    mvwprintw(menu_win, box_height - 2, 2, "Effects last for 10 moves");
     wattroff(menu_win, COLOR_PAIR(2));
     wrefresh(menu_win);
     int ch = getch();
     if (ch >= '1' && ch <= '3') {
         int talisman_type = ch - '1';
-        if (map->talismans[talisman_type].owned && map->talismans[talisman_type].count > 0) {
+        if (map->talismans[talisman_type].owned) {
+            bool already_active = false;
             for (int i = 0; i < 5; i++) {
-                if (map->talismans[talisman_type].active_durations[i] <= 0) {
-                    map->talismans[talisman_type].active_durations[i] = 10;
-                    map->talismans[talisman_type].count--;
-                    
-                    char msg[MAX_MESSAGE_LENGTH];
-                    snprintf(msg, MAX_MESSAGE_LENGTH, "Activated %s! (%d remaining)", 
-                            map->talismans[talisman_type].name, 
-                            map->talismans[talisman_type].count);
-                    set_message(map, msg);
+                if (map->talismans[talisman_type].active_durations[i] > 0) {
+                    already_active = true;
                     break;
                 }
             }
+            if (!already_active) {
+                for (int i = 0; i < 5; i++) {
+                    if (map->talismans[talisman_type].active_durations[i] <= 0) {
+                        map->talismans[talisman_type].active_durations[i] = 10;
+                        char msg[MAX_MESSAGE_LENGTH];
+                        snprintf(msg, MAX_MESSAGE_LENGTH, "Activated %s!", 
+                                map->talismans[talisman_type].name);
+                        set_message(map, msg);
+                        break;
+                    }
+                }
+            } else {
+                set_message(map, "This talisman is already active!");
+            }
+        } else {
+            set_message(map, "You haven't found this talisman yet!");
         }
     }
     werase(menu_win);
@@ -284,59 +1256,87 @@ void cast_magic_wand(Map *map, int dir_x, int dir_y) {
         set_message(map, "No magic charges left!");
         return;
     }
-    char spell_symbol;
-    if (dir_x == 0) spell_symbol = '|';
-    else if (dir_y == 0) spell_symbol = '-';
-    else spell_symbol = '*';
+    const char* spell_direction = "⚪";
     int current_x = map->player_x;
     int current_y = map->player_y;
+    char **backup_tiles = malloc(NUMLINES * sizeof(char*));
+    for (int i = 0; i < NUMLINES; i++) {
+        backup_tiles[i] = malloc(NUMCOLS * sizeof(char));
+        for (int j = 0; j < NUMCOLS; j++) {
+            backup_tiles[i][j] = current->visible_tiles[i][j];
+        }
+    }
     for (int dist = 1; dist <= 5 && !spell_hit; dist++) {
         int new_x = map->player_x + (dir_x * dist);
         int new_y = map->player_y + (dir_y * dist);
-        if (new_x < 0 || new_x >= NUMCOLS || new_y < 0 || new_y >= NUMLINES) break;
+
+        if (new_x < 0 || new_x >= NUMCOLS || new_y < 0 || new_y >= NUMLINES) {
+            break;
+        }
+
         if (current->tiles[new_y][new_x] == '|' || 
             current->tiles[new_y][new_x] == '_' || 
             current->tiles[new_y][new_x] == ' ') {
             break;
         }
+
         if (current_x != map->player_x || current_y != map->player_y) {
-            current->visible_tiles[current_y][current_x] = current->tiles[current_y][current_x];
+            current->visible_tiles[current_y][current_x] = backup_tiles[current_y][current_x];
         }
+
+        bool hit_monster = false;
         for (int i = 0; i < MONSTER_COUNT; i++) {
             Monster *monster = &current->monsters[i];
             if (monster->active && monster->x == new_x && monster->y == new_y) {
-                current->visible_tiles[new_y][new_x] = '*';
+                attron(COLOR_PAIR(5));
+                mvprintw(new_y + 4, new_x + 1, "✸"); 
                 refresh();
                 napms(100);
+                attroff(COLOR_PAIR(5));
+
                 int damage = 15;
                 monster->health -= damage;
                 monster->was_attacked = true;
                 monster->aggressive = true;
                 monster->immobilized = true;
+                
                 if (monster->health <= 0) {
                     monster->active = false;
-                    current->tiles[new_y][new_x] = '.';
+                    current->tiles[monster->y][monster->x] = '.'; 
+                    current->visible_tiles[monster->y][monster->x] = '.';  
                     set_message(map, "Your magic spell defeated the monster!");
-                } 
-                else {
+                } else {
                     char msg[MAX_MESSAGE_LENGTH];
                     snprintf(msg, MAX_MESSAGE_LENGTH, 
                             "Your spell hits the %s for %d damage and freezes it in place! (Monster HP: %d/%d)", 
                             monster->name, damage, monster->health, monster->max_health);
                     set_message(map, msg);
                 }
+                hit_monster = true;
                 spell_hit = true;
                 break;
             }
         }
-        if (!spell_hit) {
-            current->visible_tiles[new_y][new_x] = spell_symbol;
+
+        if (!hit_monster && !spell_hit) {
+            attron(COLOR_PAIR(4));  
+            mvprintw(new_y + 4, new_x + 1, "%s", spell_direction);
             refresh();
             napms(50);
+            attroff(COLOR_PAIR(4));
+
             current_x = new_x;
             current_y = new_y;
         }
     }
+    for (int i = 0; i < NUMLINES; i++) {
+        for (int j = 0; j < NUMCOLS; j++) {
+            current->visible_tiles[i][j] = backup_tiles[i][j];
+        }
+        free(backup_tiles[i]);
+    }
+    free(backup_tiles);
+
     map->weapons[WEAPON_WAND].ammo--;
     refresh();
 }
@@ -348,14 +1348,25 @@ void shoot_arrow(Map *map, int dir_x, int dir_y) {
         set_message(map, "No arrows left!");
         return;
     }
-    char arrow_symbol;
-    if (dir_x == 0 && dir_y == -1) arrow_symbol = '^';
-    else if (dir_x == 0 && dir_y == 1) arrow_symbol = '^';
-    else if (dir_x == -1 && dir_y == 0) arrow_symbol = '<';
-    else if (dir_x == 1 && dir_y == 0) arrow_symbol = '>';
+
+    const char* arrow_direction;
+    if (dir_x == 0 && dir_y == -1) arrow_direction = "↑";  
+    else if (dir_x == 0 && dir_y == 1) arrow_direction = "↓"; 
+    else if (dir_x == -1 && dir_y == 0) arrow_direction = "←";
+    else if (dir_x == 1 && dir_y == 0) arrow_direction = "→"; 
     else return;
+
     int current_x = map->player_x;
     int current_y = map->player_y;
+
+    char **backup_tiles = malloc(NUMLINES * sizeof(char*));
+    for (int i = 0; i < NUMLINES; i++) {
+        backup_tiles[i] = malloc(NUMCOLS * sizeof(char));
+        for (int j = 0; j < NUMCOLS; j++) {
+            backup_tiles[i][j] = current->visible_tiles[i][j];
+        }
+    }
+
     for (int dist = 1; dist <= 5 && !arrow_hit; dist++) {
         int new_x = map->player_x + (dir_x * dist);
         int new_y = map->player_y + (dir_y * dist);
@@ -363,6 +1374,7 @@ void shoot_arrow(Map *map, int dir_x, int dir_y) {
         if (new_x < 0 || new_x >= NUMCOLS || new_y < 0 || new_y >= NUMLINES) {
             break;
         }
+
         if (current->tiles[new_y][new_x] == '|' || 
             current->tiles[new_y][new_x] == '_' || 
             current->tiles[new_y][new_x] == ' ') {
@@ -376,22 +1388,34 @@ void shoot_arrow(Map *map, int dir_x, int dir_y) {
             }
             break;
         }
+
         if (current_x != map->player_x || current_y != map->player_y) {
-            current->visible_tiles[current_y][current_x] = current->tiles[current_y][current_x];
+            current->visible_tiles[current_y][current_x] = backup_tiles[current_y][current_x];
         }
+
+        bool hit_monster = false;
         for (int i = 0; i < MONSTER_COUNT; i++) {
             Monster *monster = &current->monsters[i];
             if (monster->active && monster->x == new_x && monster->y == new_y) {
-                current->visible_tiles[new_y][new_x] = 'x';
+                if (current->tiles[current_y][current_x] == '.') {
+                    current->tiles[current_y][current_x] = 'a';
+                }
+
+                attron(COLOR_PAIR(3));
+                mvprintw(new_y + 4, new_x + 1, "X");
                 refresh();
                 napms(100);
+                attroff(COLOR_PAIR(3));
+
                 int damage = 5;
                 monster->health -= damage;
                 monster->was_attacked = true;
                 monster->aggressive = true;
+                
                 if (monster->health <= 0) {
                     monster->active = false;
-                    current->tiles[new_y][new_x] = 'a';
+                    current->tiles[monster->y][monster->x] = '.'; 
+                    current->visible_tiles[monster->y][monster->x] = '.'; 
                     set_message(map, "Your arrow defeated the monster!");
                 } else {
                     char msg[MAX_MESSAGE_LENGTH];
@@ -399,27 +1423,45 @@ void shoot_arrow(Map *map, int dir_x, int dir_y) {
                             "Your arrow hits the %s for %d damage! (Monster HP: %d/%d)", 
                             monster->name, damage, monster->health, monster->max_health);
                     set_message(map, msg);
-                    if (current->tiles[new_y][new_x] == '.') {
-                        current->tiles[new_y][new_x] = 'a';
-                    }
                 }
+                hit_monster = true;
                 arrow_hit = true;
                 break;
             }
         }
-        if (!arrow_hit) {
-            current->visible_tiles[new_y][new_x] = arrow_symbol;
+
+        if (!hit_monster && !arrow_hit) {
+            attron(COLOR_PAIR(1)); 
+            mvprintw(new_y + 4, new_x + 1, "%s", arrow_direction);
             refresh();
             napms(50);
+            attroff(COLOR_PAIR(6));
+
             current_x = new_x;
             current_y = new_y;
+
             if (dist == 5) {
                 if (current->tiles[new_y][new_x] == '.') {
+                    current->tiles[new_y][new_x] = 'a';
+                }
+                if (current->tiles[new_y][new_x] == '#') {
                     current->tiles[new_y][new_x] = 'a';
                 }
             }
         }
     }
+    for (int i = 0; i < NUMLINES; i++) {
+        for (int j = 0; j < NUMCOLS; j++) {
+            current->visible_tiles[i][j] = backup_tiles[i][j];
+        }
+        free(backup_tiles[i]);
+    }
+    free(backup_tiles);
+
+    if (current->tiles[current_y][current_x] == '.') {
+        current->tiles[current_y][current_x] = 'a';
+    }
+
     map->weapons[WEAPON_ARROW].ammo--;
     refresh();
 }
@@ -486,18 +1528,25 @@ void show_lose_screen(Map* map) {
     mvprintw(start_y + box_height - 1, start_x + box_width - 1, "╝");
     attroff(COLOR_PAIR(1));
     attron(COLOR_PAIR(1) | A_BOLD);
-    mvprintw(start_y + 1, center_x - 4, "YOU LOST!");
+    mvprintw(start_y + 1, center_x - 7, "☠ GAME OVER ☠");
     attroff(COLOR_PAIR(1) | A_BOLD);
     attron(COLOR_PAIR(4));
     mvprintw(start_y + 3, center_x - 9, "Username : %s", current_username);
-    mvprintw(start_y + 4, center_x - 11, "Final Level Reached: %d", map->current_level);
-    mvprintw(start_y + 5, center_x - 11, "Experience so far: %d", map->exp);
+    mvprintw(start_y + 4, center_x - 13, "⚔ Final Level Reached: %d", map->current_level);
+    mvprintw(start_y + 5, center_x - 13, "✨ Experience so far: %d", map->exp);
     attroff(COLOR_PAIR(4));
     attron(COLOR_PAIR(2));
     mvprintw(start_y + 6, center_x - 10, "Press any key to exit");
     attroff(COLOR_PAIR(2));
     refresh();
     getch();
+    free_map(map);
+    endwin();
+    curs_set(1);
+    system("clear");
+    char *args[] = {"./Menu", NULL};
+    execv("./Menu", args);
+    exit(1);
 }
 void throw_dagger(Map *map, int dir_x, int dir_y) {
     Level *current = &map->levels[map->current_level - 1];
@@ -506,20 +1555,32 @@ void throw_dagger(Map *map, int dir_x, int dir_y) {
         set_message(map, "No daggers left!");
         return;
     }
-    char dagger_direction;
-    if (dir_x == 0 && dir_y == -1) dagger_direction = '|';   
-    else if (dir_x == 0 && dir_y == 1) dagger_direction = '|';  
-    else if (dir_x == -1 && dir_y == 0) dagger_direction = '-'; 
-    else if (dir_x == 1 && dir_y == 0) dagger_direction = '-'; 
+
+    const char* dagger_direction;
+    if (dir_x == 0 && dir_y == -1) dagger_direction = "↑";    
+    else if (dir_x == 0 && dir_y == 1) dagger_direction = "↓"; 
+    else if (dir_x == -1 && dir_y == 0) dagger_direction = "←"; 
+    else if (dir_x == 1 && dir_y == 0) dagger_direction = "→";  
     else return;
+
     int current_x = map->player_x;
     int current_y = map->player_y;
+    char **backup_tiles = malloc(NUMLINES * sizeof(char*));
+    for (int i = 0; i < NUMLINES; i++) {
+        backup_tiles[i] = malloc(NUMCOLS * sizeof(char));
+        for (int j = 0; j < NUMCOLS; j++) {
+            backup_tiles[i][j] = current->visible_tiles[i][j];
+        }
+    }
+
     for (int dist = 1; dist <= 5 && !dagger_stopped; dist++) {
         int new_x = map->player_x + (dir_x * dist);
         int new_y = map->player_y + (dir_y * dist);
+
         if (new_x < 0 || new_x >= NUMCOLS || new_y < 0 || new_y >= NUMLINES) {
             break;
         }
+
         if (current->tiles[new_y][new_x] == '|' || 
             current->tiles[new_y][new_x] == '_' || 
             current->tiles[new_y][new_x] == ' ') {
@@ -533,16 +1594,25 @@ void throw_dagger(Map *map, int dir_x, int dir_y) {
             }
             break;
         }
+
         if (current_x != map->player_x || current_y != map->player_y) {
-            current->visible_tiles[current_y][current_x] = current->tiles[current_y][current_x];
+            current->visible_tiles[current_y][current_x] = backup_tiles[current_y][current_x];
         }
+
         bool hit_monster = false;
         for (int i = 0; i < MONSTER_COUNT; i++) {
             Monster *monster = &current->monsters[i];
             if (monster->active && monster->x == new_x && monster->y == new_y) {
-                current->visible_tiles[new_y][new_x] = '*';
+                if (current->tiles[current_y][current_x] == '.') {
+                    current->tiles[current_y][current_x] = 'd';
+                }
+
+                attron(COLOR_PAIR(3));
+                mvprintw(new_y + 4, new_x + 1, "X");
                 refresh();
                 napms(100);
+                attroff(COLOR_PAIR(3));
+
                 int damage = 12;
                 monster->health -= damage;
                 monster->was_attacked = true;
@@ -550,7 +1620,8 @@ void throw_dagger(Map *map, int dir_x, int dir_y) {
                 
                 if (monster->health <= 0) {
                     monster->active = false;
-                    current->tiles[new_y][new_x] = 'd';
+                    current->tiles[monster->y][monster->x] = '.';  
+                    current->visible_tiles[monster->y][monster->x] = '.'; 
                     set_message(map, "Your thrown dagger defeated the monster!");
                 } else {
                     char msg[MAX_MESSAGE_LENGTH];
@@ -558,31 +1629,50 @@ void throw_dagger(Map *map, int dir_x, int dir_y) {
                             "Your thrown dagger hits the %s for %d damage! (Monster HP: %d/%d)", 
                             monster->name, damage, monster->health, monster->max_health);
                     set_message(map, msg);
-                    if (current->tiles[new_y][new_x] == '.') {
-                        current->tiles[new_y][new_x] = 'd';
-                    }
                 }
                 hit_monster = true;
                 dagger_stopped = true;
                 break;
             }
         }
+
         if (!hit_monster && !dagger_stopped) {
-            current->visible_tiles[new_y][new_x] = dagger_direction;
+            attron(COLOR_PAIR(1)); 
+            mvprintw(new_y + 4, new_x + 1, "%s", dagger_direction);
             refresh();
             napms(50);
+            attroff(COLOR_PAIR(6));
+
             current_x = new_x;
             current_y = new_y;
+
             if (dist == 5) {
                 if (current->tiles[new_y][new_x] == '.') {
+                    current->tiles[new_y][new_x] = 'd';
+                }
+                if (current->tiles[new_y][new_x] == '#') {
                     current->tiles[new_y][new_x] = 'd';
                 }
             }
         }
     }
+
+    for (int i = 0; i < NUMLINES; i++) {
+        for (int j = 0; j < NUMCOLS; j++) {
+            current->visible_tiles[i][j] = backup_tiles[i][j];
+        }
+        free(backup_tiles[i]);
+    }
+    free(backup_tiles);
+
+    if (current->tiles[current_y][current_x] == '.') {
+        current->tiles[current_y][current_x] = 'd';
+    }
+
     map->weapons[WEAPON_DAGGER].ammo--;
     refresh();
 }
+
 void show_win_screen(Map* map) {
     clear();
     int center_y = NUMLINES / 2;
@@ -611,9 +1701,9 @@ void show_win_screen(Map* map) {
     mvprintw(start_y + 1, center_x - 4, "VICTORY!");
     attroff(COLOR_PAIR(1) | A_BOLD);
     attron(COLOR_PAIR(4));
-    mvprintw(start_y + 3, center_x - 11, "Total Gold Collected: %d", map->gold);
-    mvprintw(start_y + 4, center_x - 11, "Final Level Reached: %d", map->current_level);
-    mvprintw(start_y + 5, center_x - 11, "Experience so far: %d", map->exp);
+    mvprintw(start_y + 3, center_x - 13, "💰 Total Gold Collected: %d", map->gold);
+    mvprintw(start_y + 4, center_x - 13, "⚔ Final Level Reached: %d", map->current_level);
+    mvprintw(start_y + 5, center_x - 13, "✨ Experience so far: %d", map->exp);
     attroff(COLOR_PAIR(4));
     attron(COLOR_PAIR(2));
     mvprintw(start_y + 6, center_x - 10, "Press any key to exit");
@@ -818,7 +1908,6 @@ void add_secret_walls_to_room(Level *level, Room *room) {
 }
 
 bool is_valid_secret_wall(Level *level, int x, int y) {
-    // Must be a wall tile
     if (level->tiles[y][x] != '|' && level->tiles[y][x] != '_') {
         return false;
     }
@@ -844,7 +1933,9 @@ void set_message(Map *map, const char *message) {
 int MIN(int a, int b) {
     return (a < b) ? a : b;
 }
-
+int MAX(int a, int b) {
+    return (b < a) ? a : b;
+}
 bool check_for_stairs(Level *level) {
     for (int y = 0; y < NUMLINES; y++) {
         for (int x = 0; x < NUMCOLS; x++) {
@@ -937,6 +2028,7 @@ Map* create_map() {
         free(map);
         return NULL;
     }
+    map->difficulty = get_difficulty_from_settings();
     for (int l = 0; l < MAX_LEVELS; l++) {
         Level *level = &map->levels[l];
         level->coins = malloc(NUMLINES * sizeof(bool*));
@@ -1027,6 +2119,11 @@ Map* create_map() {
         level->secret_entrance.y = -1;
     }
     map->food_count = 0;
+    for (int i = 0; i < 5; i++) {
+        map->food_freshness[i] = 0;
+        map->food_is_rotten[i] = false;
+        map->food_types[i] = FOOD_NORMAL;
+    }
     map->hunger = 100;
     map->hunger_timer = 0;
     map->food_menu_open = false;
@@ -1036,7 +2133,19 @@ Map* create_map() {
     map->debug_mode = false;
     map->current_message[0] = '\0';
     map->message_timer = 0;
-    map->health = 25;
+    switch(map->difficulty) {
+        case DIFFICULTY_EASY:
+            map->health = 30; 
+            break;
+        case DIFFICULTY_MEDIUM:
+            map->health = 25; 
+            break;
+        case DIFFICULTY_HARD:
+            map->health = 20;  
+            break;
+        default:
+            map->health = 25;  
+    }
     map->strength = 16;
     map->gold = 0;
     map->armor = 0;
@@ -1051,10 +2160,17 @@ Map* create_map() {
     map->weapons[WEAPON_SWORD] = (Weapon){WEAPON_SWORD, "Sword", "⚔", false, -1}; 
     map->current_weapon = WEAPON_MACE;
     map->weapon_menu_open = false;
-    map->talismans[TALISMAN_HEALTH] = (Talisman){TALISMAN_HEALTH, "Health Talisman", "◆", COLOR_PAIR(4), false};
-    map->talismans[TALISMAN_DAMAGE] = (Talisman){TALISMAN_DAMAGE, "Damage Talisman", "◆", COLOR_PAIR(3), false};
-    map->talismans[TALISMAN_SPEED] = (Talisman){TALISMAN_SPEED, "Speed Talisman", "◆", COLOR_PAIR(5), false};
+    map->talismans[TALISMAN_HEALTH] = (Talisman){TALISMAN_HEALTH, "Health Talisman", "◆", COLOR_PAIR(4), true,{0} , false, 0, 3};
+    map->talismans[TALISMAN_DAMAGE] = (Talisman){TALISMAN_DAMAGE, "Damage Talisman", "◆", COLOR_PAIR(3), true,{0} , false, 0, 3};
+    map->talismans[TALISMAN_SPEED] = (Talisman){TALISMAN_SPEED, "Speed Talisman", "◆", COLOR_PAIR(5), true,{0} , false, 0, 3};
     map->talisman_menu_open = false;
+    map->normal_food = 0;
+    map->crimson_flask = 0;
+    map->cerulean_flask = 0;
+    map->rotten_food = 0;
+    map->moves_remaining = 0;
+    map->damage_doubled = false;
+    map->speed_doubled = false;
     load_game_settings(map);
     load_user_stats(map);
     return map;
@@ -1169,13 +2285,14 @@ void display_food_menu(WINDOW *win, Map *map) {
     for (int i = 1; i < box_height - 1; i++) {
         mvwprintw(menu_win, i, 0, "║");
         mvwprintw(menu_win, i, box_width - 1, "║");
-    } 
+    }
     mvwprintw(menu_win, box_height - 1, 0, "╚");
     for (int i = 1; i < box_width - 1; i++) {
         mvwprintw(menu_win, box_height - 1, i, "═");
     }
     mvwprintw(menu_win, box_height - 1, box_width - 1, "╝");
     wattroff(menu_win, COLOR_PAIR(1));
+
     wattron(menu_win, COLOR_PAIR(2));
     mvwprintw(menu_win, 1, 2, "Food Menu");
     mvwprintw(menu_win, 2, 2, "Hunger: ");
@@ -1184,10 +2301,30 @@ void display_food_menu(WINDOW *win, Map *map) {
         mvwprintw(menu_win, 2, 10 + i, "█");
     }
     wattroff(menu_win, COLOR_PAIR(map->hunger > 30 ? 4 : 3));
-    mvwprintw(menu_win, 4, 2, "Food Items: %d/5", map->food_count);
-    mvwprintw(menu_win, 6, 2, "Press E to eat food");
-    mvwprintw(menu_win, 7, 2, "Press any other key to close");
+    mvwprintw(menu_win, 3, 2, "Press 1-3 to consume item");
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, 4, 2, "Food Items: %d/10", map->normal_food + map->crimson_flask + map->cerulean_flask);
+    int y_pos = 5;
+    
+    if (map->normal_food > 0) {
+        wattron(menu_win, COLOR_PAIR(4));
+        mvwprintw(menu_win, y_pos++, 4, "1. Food (%d)", map->normal_food);
+    }
+    
+    if (map->crimson_flask > 0) {
+        wattron(menu_win, COLOR_PAIR(3));
+        mvwprintw(menu_win, y_pos++, 4, "2. ◯ Flask of Crimson Tears (%d)", map->crimson_flask);
+    }
+    
+    if (map->cerulean_flask > 0) {
+        wattron(menu_win, COLOR_PAIR(5));
+        mvwprintw(menu_win, y_pos++, 4, "3. ◯ Flask of Cerulean Tears (%d)", map->cerulean_flask);
+    }
+
+    wattron(menu_win, COLOR_PAIR(2));
+    mvwprintw(menu_win, box_height - 2, 2, "Press any other key to close");
     wattroff(menu_win, COLOR_PAIR(2));
+
     wrefresh(menu_win);
     int ch = getch();
     werase(menu_win);
@@ -1195,23 +2332,69 @@ void display_food_menu(WINDOW *win, Map *map) {
     delwin(menu_win);
     redrawwin(stdscr);
     refresh();
-    if (ch == 'e' || ch == 'E') {
-        if (map->food_count > 0 && map->hunger < 50) {
-            map->food_count--;
-            map->hunger = MIN(map->hunger + 10, 50);
-            set_message(map, "You ate some food!");
-        }
+
+    if (ch == '1' && map->normal_food > 0) {
+        consume_food(map, 1);
+    } else if (ch == '2' && map->crimson_flask > 0) {
+        consume_food(map, 2);
+    } else if (ch == '3' && map->cerulean_flask > 0) {
+        consume_food(map, 3);
+    }
+}
+
+void consume_food(Map *map, int type) {
+    switch(type) {
+        case 1:
+            if (map->rotten_food > 0) {
+                map->rotten_food--;
+                map->normal_food--;
+                map->health = MAX(1, map->health - 5);
+                map->hunger = MIN(100, map->hunger + 10);
+                set_message(map, "Yuck! The food was rotten! You don't feel so good...");
+            } else {
+                map->normal_food--;
+                map->hunger = MIN(100, map->hunger + 30);
+                map->health = MIN(25, map->health + 5);
+                set_message(map, "You eat some food. It was tasty!");
+            }
+            break;
+            
+        case 2: 
+            map->crimson_flask--;
+            map->hunger = MIN(100, map->hunger + 50);
+            map->health = MIN(25, map->health + 10);
+            map->damage_doubled = true;
+            map->moves_remaining = 10;
+            set_message(map, "You drink the Crimson Tears. You feel powerful and refreshed!");
+            break;
+            
+        case 3:
+            map->cerulean_flask--;
+            map->hunger = MIN(100, map->hunger + 50);
+            map->health = MIN(25, map->health + 10);
+            map->speed_doubled = true;
+            map->moves_remaining = 10;
+            set_message(map, "You drink the Cerulean Tears. You feel swift and refreshed!");
+            break;
     }
 }
 
 void eat_food(Map *map) {
-    if (map->food_count > 0) {
-        map->food_count--;
-        map->hunger = MIN(100, map->hunger + 30); 
-        map->health = MIN(25, map->health + 5); 
-        set_message(map, "You eat some food. It was tasty!");
-    } else {
+    if (map->food_count <= 0) {
         set_message(map, "You don't have any food!");
+        return;
+    }
+    int oldest_index = -1;
+    for (int i = 0; i < 5; i++) {
+        if (map->food_freshness[i] > 0) {
+            if (oldest_index == -1 || map->food_freshness[i] < map->food_freshness[oldest_index]) {
+                oldest_index = i;
+            }
+        }
+    }
+    
+    if (oldest_index != -1) {
+        consume_food(map, oldest_index);
     }
 }
 
@@ -1296,6 +2479,42 @@ void draw_room(Level *level, Room *room) {
             }
         }
     }
+    if (level == 1) {
+        if (!room->gone && level->num_rooms > 0 && !level->fighting_trap_triggered) {
+            bool has_fighting_trap = false;
+            for (int y = 0; y < NUMLINES; y++) {
+                for (int x = 0; x < NUMCOLS; x++) {
+                    if (level->tiles[y][x] == 'v') {
+                        has_fighting_trap = true;
+                        break;
+                    }
+                }
+                if (has_fighting_trap) break;
+            }
+            if (!has_fighting_trap && rand() % 100 < 15) {
+                int valid_tries = 0;
+                const int MAX_TRIES = 50;
+                
+                while (valid_tries < MAX_TRIES) {
+                    int trap_x = room->pos.x + 2 + (rand() % (room->max.x - 4)); 
+                    int trap_y = room->pos.y + 2 + (rand() % (room->max.y - 4)); 
+                    if (level->tiles[trap_y][trap_x] == '.' && 
+                        !level->traps[trap_y][trap_x] && 
+                        level->tiles[trap_y][trap_x] != '>' && 
+                        level->tiles[trap_y][trap_x] != '<' &&
+                        level->tiles[trap_y][trap_x] != '*' &&
+                        level->tiles[trap_y][trap_x] != '$' &&
+                        level->tiles[trap_y][trap_x] != '&') {
+                        
+                        level->fighting_trap.x = trap_x;
+                        level->fighting_trap.y = trap_y;
+                        break;
+                    }
+                    valid_tries++;
+                }
+            }
+        }
+    }
     int num_traps = rand() % 2;
     for (int i = 0; i < num_traps; i++) {
         int trap_x = room->pos.x + 1 + (rand() % (room->max.x - 2));
@@ -1306,12 +2525,19 @@ void draw_room(Level *level, Room *room) {
             level->traps[trap_y][trap_x] = true;
         }
     }
-    if (rand() % 5 == 0) {
+    if (rand() % 5 == 0) { 
         int food_x = room->pos.x + 1 + (rand() % (room->max.x - 2));
         int food_y = room->pos.y + 1 + (rand() % (room->max.y - 2));
         if (level->tiles[food_y][food_x] == '.' && 
             !level->traps[food_y][food_x]) {
-            level->tiles[food_y][food_x] = '*';
+            int food_roll = rand() % 100;
+            if (food_roll < 15) {
+                level->tiles[food_y][food_x] = 'C'; 
+            } else if (food_roll < 30) {
+                level->tiles[food_y][food_x] = 'B'; 
+            } else {
+                level->tiles[food_y][food_x] = '*'; 
+            }
         }
     }
     if (level->num_rooms == 0) {
@@ -1416,13 +2642,26 @@ void connect_rooms(Level *level, Room *r1, Room *r2) {
 
 void update_visibility(Map *map) {
     Level *current = &map->levels[map->current_level - 1];
+
     for (int y = 0; y < NUMLINES; y++) {
         for (int x = 0; x < NUMCOLS; x++) {
             if (current->explored[y][x] || map->debug_mode) {
                 current->visible_tiles[y][x] = current->tiles[y][x];
-                if (map->debug_mode && current->secret_walls[y][x] && 
-                    (current->tiles[y][x] == '|' || current->tiles[y][x] == '_')) {
-                    current->visible_tiles[y][x] = '?';
+                
+                if (map->debug_mode) {
+
+                    if (current->traps[y][x]) {
+                        current->visible_tiles[y][x] = '^';
+                    }
+
+                    if (x == current->fighting_trap.x && y == current->fighting_trap.y && !current->fighting_trap_triggered) {
+                        current->visible_tiles[y][x] = 'v';
+                    }
+
+                    if (current->secret_walls[y][x] && 
+                        (current->tiles[y][x] == '|' || current->tiles[y][x] == '_')) {
+                        current->visible_tiles[y][x] = '?';
+                    }
                 }
             } 
             else {
@@ -1438,8 +2677,16 @@ void update_visibility(Map *map) {
             map->player_x < room->pos.x + room->max.x &&
             map->player_y >= room->pos.y && 
             map->player_y < room->pos.y + room->max.y) {
+
+            for (int y = room->pos.y; y < room->pos.y + room->max.y; y++) {
+                for (int x = room->pos.x; x < room->pos.x + room->max.x; x++) {
+                    if (y >= 0 && y < NUMLINES && x >= 0 && x < NUMCOLS) {
+                        current->explored[y][x] = true;
+                        current->visible_tiles[y][x] = current->tiles[y][x];
+                    }
+                }
+            }
             in_room = true;
-            current_room = room;
             break;
         }
     }
@@ -1514,6 +2761,7 @@ void update_visibility(Map *map) {
 void generate_map(Map *map) {
     Level *current = &map->levels[map->current_level - 1];
         if (map->current_level == 5) {
+
         for (int y = 0; y < NUMLINES; y++) {
             for (int x = 0; x < NUMCOLS; x++) {
                 current->tiles[y][x] = ' ';
@@ -1588,34 +2836,72 @@ void generate_map(Map *map) {
                 return;
             }
         }
-        Monster *undead = &current->monsters[MONSTER_UNDEAD];
-        undead->active = true;
-        undead->aggressive = true;
-        undead->health = undead->max_health;
-        undead->was_attacked = false;
-        int tries = 0;
-        do {
-            undead->x = treasure_room.pos.x + 1 + (rand() % (treasure_room.max.x - 2));
-            undead->y = treasure_room.pos.y + 1 + (rand() % (treasure_room.max.y - 2));
-            tries++;
-        } 
-        while ((current->tiles[undead->y][undead->x] != '.' || 
-                current->traps[undead->y][undead->x]) && 
-                tries < 100);
+    Monster *undead = &current->monsters[MONSTER_UNDEAD];
+    undead->active = true;
+    undead->aggressive = true;
+    undead->health = undead->max_health;
+    undead->was_attacked = false;
+    int tries = 0;
+    do {
+        undead->x = treasure_room.pos.x + 1 + (rand() % (treasure_room.max.x - 2));
+        undead->y = treasure_room.pos.y + 1 + (rand() % (treasure_room.max.y - 2));
+        tries++;
+    } 
+    while ((current->tiles[undead->y][undead->x] != '.' || 
+            current->traps[undead->y][undead->x]) && 
+            tries < 100);
 
-        if (tries < 100) {
-            current->tiles[undead->y][undead->x] = 'U';
+    if (tries < 100) {
+        current->tiles[undead->y][undead->x] = 'U';
+    }
+    Monster *undead2 = &current->monsters[MONSTER_DEMON];
+    undead2->type = MONSTER_UNDEAD;
+    undead2->name = "Undead";
+    undead2->symbol = 'U';
+    undead2->health = undead2->max_health = 30;
+    undead2->damage = 5;
+    undead2->active = true;
+    undead2->aggressive = true;
+    undead2->was_attacked = false;
+    
+    tries = 0;
+    do {
+        undead2->x = treasure_room.pos.x + 1 + (rand() % (treasure_room.max.x - 2));
+        undead2->y = treasure_room.pos.y + 1 + (rand() % (treasure_room.max.y - 2));
+        tries++;
+    } while ((current->tiles[undead2->y][undead2->x] != '.' || 
+              current->traps[undead2->y][undead2->x] ||
+              (undead2->x == undead->x && undead2->y == undead->y)) && 
+             tries < 100);
+
+    if (tries < 100) {
+        current->tiles[undead2->y][undead2->x] = 'U';
+    }
+    Monster *snake = &current->monsters[MONSTER_SNAKE];
+    snake->active = true;
+    snake->aggressive = true;
+    snake->health = snake->max_health;
+    snake->was_attacked = false;
+    
+    tries = 0;
+    do {
+        snake->x = treasure_room.pos.x + 1 + (rand() % (treasure_room.max.x - 2));
+        snake->y = treasure_room.pos.y + 1 + (rand() % (treasure_room.max.y - 2));
+        tries++;
+    } while ((current->tiles[snake->y][snake->x] != '.' || 
+              current->traps[snake->y][snake->x] ||
+              (snake->x == undead->x && snake->y == undead->y) ||
+              (snake->x == undead2->x && snake->y == undead2->y)) && 
+             tries < 100);
+
+    if (tries < 100) {
+        current->tiles[snake->y][snake->x] = 'S';
+    }
+    for (int i = 0; i < MONSTER_COUNT; i++) {
+        if (i != MONSTER_UNDEAD && i != MONSTER_DEMON && i != MONSTER_SNAKE) {
+            current->monsters[i].active = false;
         }
-        for (int i = 0; i < MONSTER_COUNT; i++) {
-            if (i != MONSTER_UNDEAD) {
-                current->monsters[i].active = false;
-            }
-        }
-        current->rooms[0] = treasure_room;
-        current->num_rooms = 1;
-        map->player_x = treasure_room.center.x;
-        map->player_y = treasure_room.center.y;
-        
+    }
         return;
     }
     current->num_rooms = 0;
@@ -1728,6 +3014,10 @@ void generate_map(Map *map) {
             }
         }
     }
+    if (current->num_rooms > 1) {
+        int room_index = 1 + (rand() % (current->num_rooms - 1));
+        place_fighting_trap(current, &current->rooms[room_index]);
+    }
 }
 
 void transition_level(Map *map, bool going_up) {
@@ -1746,6 +3036,7 @@ void transition_level(Map *map, bool going_up) {
             map->current_level++;
             Level *next = &map->levels[map->current_level - 1]; 
             if (map->current_level == 5) {
+                //play_background_music("4");
                 for (int y = 0; y < NUMLINES; y++) {
                     for (int x = 0; x < NUMCOLS; x++) {
                         next->tiles[y][x] = ' ';
@@ -1806,6 +3097,68 @@ void transition_level(Map *map, bool going_up) {
                         next->traps[trap_y][trap_x] = true;
                     }
                 }
+                Monster *undead1 = &next->monsters[MONSTER_UNDEAD];
+                undead1->active = true;
+                undead1->aggressive = true;
+                undead1->health = undead1->max_health;
+                undead1->was_attacked = false;
+                Monster *undead2 = &next->monsters[MONSTER_DEMON];
+                undead2->type = MONSTER_UNDEAD;
+                undead2->name = "Undead";
+                undead2->symbol = 'U';
+                undead2->health = undead2->max_health = 30;
+                undead2->damage = 5;
+                undead2->active = true;
+                undead2->aggressive = true;
+                undead2->was_attacked = false;
+                Monster *snake = &next->monsters[MONSTER_SNAKE];
+                snake->active = true;
+                snake->aggressive = true;
+                snake->health = snake->max_health;
+                snake->was_attacked = false;
+                int tries = 0;
+                do {
+                    undead1->x = treasure_room.pos.x + 1 + (rand() % (treasure_room.max.x - 2));
+                    undead1->y = treasure_room.pos.y + 1 + (rand() % (treasure_room.max.y - 2));
+                } while ((next->tiles[undead1->y][undead1->x] != '.' || 
+                        next->traps[undead1->y][undead1->x]) && 
+                        ++tries < 100);
+
+                if (tries < 100) {
+                    next->tiles[undead1->y][undead1->x] = 'U';
+                }
+
+                tries = 0;
+                do {
+                    undead2->x = treasure_room.pos.x + 1 + (rand() % (treasure_room.max.x - 2));
+                    undead2->y = treasure_room.pos.y + 1 + (rand() % (treasure_room.max.y - 2));
+                } while ((next->tiles[undead2->y][undead2->x] != '.' || 
+                        next->traps[undead2->y][undead2->x] ||
+                        (undead2->x == undead1->x && undead2->y == undead1->y)) && 
+                        ++tries < 100);
+
+                if (tries < 100) {
+                    next->tiles[undead2->y][undead2->x] = 'U';
+                }
+
+                tries = 0;
+                do {
+                    snake->x = treasure_room.pos.x + 1 + (rand() % (treasure_room.max.x - 2));
+                    snake->y = treasure_room.pos.y + 1 + (rand() % (treasure_room.max.y - 2));
+                } while ((next->tiles[snake->y][snake->x] != '.' || 
+                        next->traps[snake->y][snake->x] ||
+                        (snake->x == undead1->x && snake->y == undead1->y) ||
+                        (snake->x == undead2->x && snake->y == undead2->y)) && 
+                        ++tries < 100);
+
+                if (tries < 100) {
+                    next->tiles[snake->y][snake->x] = 'S';
+                }
+                for (int i = 0; i < MONSTER_COUNT; i++) {
+                    if (i != MONSTER_UNDEAD && i != MONSTER_DEMON && i != MONSTER_SNAKE) {
+                        next->monsters[i].active = false;
+                    }
+                }
                 next->stairs_down.x = treasure_room.center.x;
                 next->stairs_down.y = treasure_room.pos.y + 1;
                 next->tiles[next->stairs_down.y][next->stairs_down.x] = '<';
@@ -1820,6 +3173,7 @@ void transition_level(Map *map, bool going_up) {
                 next->stairs_placed = true;
             }
             else if (!next->stairs_placed) {
+                //play_background_music("1");
                 for (int y = 0; y < NUMLINES; y++) {
                     for (int x = 0; x < NUMCOLS; x++) {
                         next->tiles[y][x] = ' ';
@@ -1857,6 +3211,27 @@ void transition_level(Map *map, bool going_up) {
             snprintf(msg, MAX_MESSAGE_LENGTH, "Ascending to level %d", map->current_level);
             set_message(map, msg);
         }
+    }
+    else {
+
+        if (map->current_level > 1) {
+            map->current_level--;
+            Level *prev = &map->levels[map->current_level - 1];
+            
+
+            if (map->prev_stair_x != -1 && map->prev_stair_y != -1) {
+                map->player_x = map->prev_stair_x;
+                map->player_y = map->prev_stair_y;
+
+                char msg[MAX_MESSAGE_LENGTH];
+                snprintf(msg, MAX_MESSAGE_LENGTH, "Descending back to level %d", map->current_level);
+                set_message(map, msg);
+            }
+        }
+    }
+    if (going_up) {
+        map->prev_stair_x = map->player_x;
+        map->prev_stair_y = map->player_y;
     }
     update_visibility(map);
 }
@@ -2100,7 +3475,34 @@ void update_monsters(Map *map) {
         }
     }
 }
+void update_talisman_effects(Map *map) {
+    for (int i = 0; i < TALISMAN_COUNT; i++) {
+        if (map->talismans[i].is_active) {
+            map->talismans[i].moves_remaining--;
+            
+            if (map->talismans[i].moves_remaining <= 0) {
+                map->talismans[i].is_active = false;
 
+                switch(i) {
+                    case TALISMAN_HEALTH:
+                        map->health_regen_doubled = false;
+                        break;
+                    case TALISMAN_DAMAGE:
+                        map->damage_doubled = false;
+                        break;
+                    case TALISMAN_SPEED:
+                        map->speed_doubled = false;
+                        break;
+                }
+                
+                char msg[MAX_MESSAGE_LENGTH];
+                snprintf(msg, MAX_MESSAGE_LENGTH, "%s effect has worn off!", 
+                        map->talismans[i].name);
+                set_message(map, msg);
+            }
+        }
+    }
+}
 bool is_monster_at(Level *level, int x, int y) {
     for (int i = 0; i < MONSTER_COUNT; i++) {
         if (level->monsters[i].active && 
@@ -2118,35 +3520,35 @@ void handle_input(Map *map, int input) {
     int new_y = map->player_y;
     if (input >= '1' && input <= '3') {
         int talisman_type = input - '1';
-        if (map->talismans[talisman_type].owned && map->talismans[talisman_type].count > 0) {
-            for (int i = 0; i < 5; i++) {
-                if (map->talismans[talisman_type].active_durations[i] <= 0) {
-                    map->talismans[talisman_type].active_durations[i] = 10;
-                    map->talismans[talisman_type].count--;
-                    
-                    switch(talisman_type) {
-                        case TALISMAN_HEALTH:
-                            map->health_regen_doubled = true;
-                            break;
-                        case TALISMAN_DAMAGE:
-                            map->damage_doubled = true;
-                            break;
-                        case TALISMAN_SPEED:
-                            map->speed_doubled = true;
-                            break;
-                    }
-                    char msg[MAX_MESSAGE_LENGTH];
-                    snprintf(msg, MAX_MESSAGE_LENGTH, "Activated %s! (%d remaining)", 
-                            map->talismans[talisman_type].name, 
-                            map->talismans[talisman_type].count);
-                    set_message(map, msg);
-                    return;
+        if (map->talismans[talisman_type].owned) {
+            if (!map->talismans[talisman_type].is_active) {
+                map->talismans[talisman_type].is_active = true;
+                map->talismans[talisman_type].moves_remaining = 10;
+                map->talismans[talisman_type].count--; 
+                switch(talisman_type) {
+                    case TALISMAN_HEALTH:
+                        map->health_regen_doubled = true;
+                        break;
+                    case TALISMAN_DAMAGE:
+                        map->damage_doubled = true;
+                        break;
+                    case TALISMAN_SPEED:
+                        map->speed_doubled = true;
+                        break;
                 }
+                
+                char msg[MAX_MESSAGE_LENGTH];
+                snprintf(msg, MAX_MESSAGE_LENGTH, "Activated %s! (10 moves remaining)", 
+                        map->talismans[talisman_type].name);
+                set_message(map, msg);
+                if (map->talismans[talisman_type].count == 0) {
+                    map->talismans[talisman_type].owned = false; 
+                }
+            } else {
+                set_message(map, "This talisman is already active!");
             }
-            set_message(map, "Too many active talismans of this type!");
-        } 
-        else {
-            set_message(map, "You don't have any of these talismans!");
+        } else {
+            set_message(map, "You haven't found this talisman yet!");
         }
         return;
     }
@@ -2310,24 +3712,13 @@ void handle_input(Map *map, int input) {
             case '\n': case '\r':
                 if (current->tiles[map->player_y][map->player_x] == 'T') {
                     int talisman_type = current->talisman_type;
-                    if (!map->talismans[talisman_type].owned) {
-                        map->talismans[talisman_type].owned = true;
-                        current->tiles[map->player_y][map->player_x] = '.';
-                        char msg[MAX_MESSAGE_LENGTH];
-                        snprintf(msg, MAX_MESSAGE_LENGTH, "You obtained the %s!", 
-                                map->talismans[talisman_type].name);
-                        set_message(map, msg);
-                        switch(talisman_type) {
-                            case TALISMAN_HEALTH:
-                                map->health += 10;
-                                break;
-                            case TALISMAN_DAMAGE:
-                                map->strength += 5;
-                                break;
-                            case TALISMAN_SPEED:
-                                break;
-                        }
-                    }
+                    map->talismans[talisman_type].owned = true;
+                    map->talismans[talisman_type].count++;
+                    current->tiles[map->player_y][map->player_x] = '.';
+                    char msg[MAX_MESSAGE_LENGTH];
+                    snprintf(msg, MAX_MESSAGE_LENGTH, "You obtained the %s!", 
+                            map->talismans[talisman_type].name);
+                    set_message(map, msg);
                 }
                 if (abs(map->player_x - current->current_secret_room->center.x) <= 1 &&
                     abs(map->player_y - current->current_secret_room->center.y) <= 1) {
@@ -2345,6 +3736,7 @@ void handle_input(Map *map, int input) {
                         current->explored[map->player_y][map->player_x] = true;
                     }
                     current->current_secret_room = NULL;
+                    //play_background_music("1");
                     set_message(map, "You return from the secret room.");
                     return;
                 }
@@ -2363,11 +3755,22 @@ void handle_input(Map *map, int input) {
         return;
     }
     switch (input) {
-        case 'w': case 'W': new_y--; break;
-        case 's': case 'S': new_y++; break;
-        case 'a': case 'A': new_x--; break;
-        case 'd': case 'D': new_x++; break;
+        case 'w': case 'W': 
+            new_y = map->player_y - (map->speed_doubled ? 2 : 1); 
+            break;
+        case 's': case 'S': 
+            new_y = map->player_y + (map->speed_doubled ? 2 : 1); 
+            break;
+        case 'a': case 'A': 
+            new_x = map->player_x - (map->speed_doubled ? 2 : 1); 
+            break;
+        case 'd': case 'D': 
+            new_x = map->player_x + (map->speed_doubled ? 2 : 1); 
+            break;
         case '\n': case '\r':
+            if (new_x != map->player_x || new_y != map->player_y) {
+                update_talisman_effects(map);
+            }
             if (current->tiles[map->player_y][map->player_x] == 's' ||
                 current->tiles[map->player_y][map->player_x] == 'd' || 
                 current->tiles[map->player_y][map->player_x] == 'm' || 
@@ -2422,13 +3825,25 @@ void handle_input(Map *map, int input) {
                 }
                 return;
             }
-            if (current->tiles[new_y][new_x] == '*') {
-                if (map->food_count < 5) {
-                    map->food_count++;
+            if (current->tiles[new_y][new_x] == '*' || 
+                current->tiles[new_y][new_x] == 'C' || 
+                current->tiles[new_y][new_x] == 'B') {
+                
+                int total_items = map->normal_food + map->crimson_flask + map->cerulean_flask;
+                if (total_items < 10) {
+                    if (current->tiles[new_y][new_x] == 'C') {
+                        map->cerulean_flask++;
+                        set_message(map, "You found a Flask of Cerulean Tears!");
+                    } else if (current->tiles[new_y][new_x] == 'B') {
+                        map->crimson_flask++;
+                        set_message(map, "You found a Flask of Crimson Tears!");
+                    } else {
+                        map->normal_food++;
+                        set_message(map, "You found some food!");
+                    }
                     current->tiles[new_y][new_x] = '.';
-                    set_message(map, "You found some food!");
                 } else {
-                    set_message(map, "You can't carry any more food!");
+                    set_message(map, "You can't carry any more items!");
                 }
             }
             if (current->tiles[new_y][new_x] == 'T') {
@@ -2473,25 +3888,30 @@ void handle_input(Map *map, int input) {
             }
             if (current->tiles[map->player_y][map->player_x] == '>') {
                 set_message(map, "Press Enter to go up to next level");
-                if (map->current_level == 5) {
-                    save_user_data(map);
-                    show_win_screen(map);
-                    free_map(map);
-                    clear();
-                    refresh();
-                    endwin();
-                    curs_set(1);
-                    system("clear");
-                    exit(0);
+                if (input == '\n' || input == '\r') {
+                    if (map->current_level == 5) {
+                        save_user_data(map);
+                        show_win_screen(map);
+                        free_map(map);
+                        clear();
+                        refresh();
+                        endwin();
+                        curs_set(1);
+                        system("clear");
+                        exit(0);
+                    }
+                    transition_level(map, true); 
+                    update_visibility(map);
+                    return;
                 }
-                transition_level(map, true);
-                return;
-            } else if (current->tiles[map->player_y][map->player_x] == '<') {
+            } 
+            else if (current->tiles[map->player_y][map->player_x] == '<') {
                 set_message(map, "Press Enter to go down to previous level");
-                if (map->current_level > 1) {
-                    transition_level(map, false);
+                if ((input == '\n' || input == '\r') && map->current_level > 1) {
+                    transition_level(map, false); 
+                    update_visibility(map);
+                    return;
                 }
-                return;
             }
             if (current->secret_stairs[map->player_y][map->player_x]) {
                 for (int y = 0; y < NUMLINES; y++) {
@@ -2507,6 +3927,7 @@ void handle_input(Map *map, int input) {
                 map->player_x = current->current_secret_room->center.x;
                 map->player_y = current->current_secret_room->center.y;
                 draw_secret_room(current);
+                //play_background_music("2");
                 set_message(map, "You descend the mysterious stairs into a secret Talisman room!");
                 return;
             }
@@ -2530,6 +3951,7 @@ void handle_input(Map *map, int input) {
                             map->player_x = current->current_secret_room->center.x;
                             map->player_y = current->current_secret_room->center.y;
                             draw_secret_room(current);
+                            //play_background_music("2");
                             set_message(map, "You enter a secret Talisman room!");
                             return;
                         }
@@ -2548,8 +3970,8 @@ void handle_input(Map *map, int input) {
         Monster *monster = &current->monsters[i];
         if (monster->active && monster->x == new_x && monster->y == new_y) {
             hasCombat = true;
-            int damage = (map->current_weapon == WEAPON_MACE) ? 5 : 
-                        (map->current_weapon == WEAPON_SWORD) ? 10 : 3;
+            int damage = calculate_damage(map, (map->current_weapon == WEAPON_MACE) ? 5 : 
+                        (map->current_weapon == WEAPON_SWORD) ? 10 : 3);
             monster->health -= damage;
             monster->was_attacked = true;
             monster->aggressive = true;
@@ -2629,6 +4051,27 @@ void handle_input(Map *map, int input) {
             snprintf(msg, MAX_MESSAGE_LENGTH, "You triggered a trap! Lost %d health!", damage);
             set_message(map, msg);
         }
+        if (!current->fighting_trap_triggered && 
+            new_x == current->fighting_trap.x && 
+            new_y == current->fighting_trap.y) {
+            
+            current->fighting_trap_triggered = true;
+            current->in_fighting_room = true;
+            current->return_pos.x = map->player_x;
+            current->return_pos.y = map->player_y;
+            
+            create_fighting_room(current);
+            //play_background_music("3");
+            int room_width = 15;
+            int room_height = 10;
+            int start_x = (NUMCOLS - room_width) / 2;
+            int start_y = (NUMLINES - room_height) / 2;
+            map->player_x = start_x + (room_width / 2);
+            map->player_y = start_y + 1;
+            
+            set_message(map, "You've triggered a fighting trap! Defeat all enemies to escape!");
+            return;
+        }
         if (current->coins[new_y][new_x]) {
             int coin_value = current->coin_values[new_y][new_x];
             map->gold += coin_value;
@@ -2663,7 +4106,14 @@ void handle_input(Map *map, int input) {
         }
     }
     for (int type = 0; type < TALISMAN_COUNT; type++) {
+        bool was_active = false;
         bool still_active = false;
+        for (int i = 0; i < 5; i++) {
+            if (map->talismans[type].active_durations[i] > 0) {
+                was_active = true;
+                break;
+            }
+        }
         for (int i = 0; i < 5; i++) {
             if (map->talismans[type].active_durations[i] > 0) {
                 map->talismans[type].active_durations[i]--;
@@ -2672,6 +4122,13 @@ void handle_input(Map *map, int input) {
                 }
             }
         }
+
+        if (was_active && !still_active) {
+            char msg[MAX_MESSAGE_LENGTH];
+            snprintf(msg, MAX_MESSAGE_LENGTH, "%s effect has worn off!", 
+                    map->talismans[type].name);
+            set_message(map, msg);
+        } 
         switch(type) {
             case TALISMAN_HEALTH:
                 map->health_regen_doubled = still_active;
@@ -2684,47 +4141,49 @@ void handle_input(Map *map, int input) {
                 break;
         }
     }
-    if (map->health_regen_doubled && map->hunger > 50 && map->health < 25) {
-        if (map->health < 25) {
-            map->health++;
+    if (map->moves_remaining > 0) {
+        map->moves_remaining--;
+        map->speed_doubled = true;
+        map->damage_doubled = true;
+        if (map->moves_remaining == 0) {
+            map->speed_doubled = false;
+            map->damage_doubled = false;
+            set_message(map, "The flask's effects have worn off!");
         }
     }
     if (map->speed_doubled) {
-        if (map->message_timer <= 0) {
-            set_message(map, "Speed boost active!");
-        }
-    }
-    if (map->damage_doubled) {
-        if (hasCombat && map->message_timer > 0) {
-            char additional_msg[MAX_MESSAGE_LENGTH];
-            snprintf(additional_msg, MAX_MESSAGE_LENGTH, " (Damage doubled by talisman!)");
-            strncat(map->current_message, additional_msg, 
-                MAX_MESSAGE_LENGTH - strlen(map->current_message) - 1);
-        }
-    }
-    if (map->speed_doubled && (new_x != map->player_x || new_y != map->player_y)) {
-        int dx = new_x - map->player_x;
-        int dy = new_y - map->player_y;
-        new_x += dx;
-        new_y += dy;
-        if (new_x >= 0 && new_x < NUMCOLS && new_y >= 0 && new_y < NUMLINES) {
-            if (current->tiles[new_y][new_x] != '|' && 
-                current->tiles[new_y][new_x] != '_' && 
-                current->tiles[new_y][new_x] != ' ') {
-                map->player_x = new_x;
-                map->player_y = new_y;
+        if (next_tile != '|' && next_tile != '_' && next_tile != ' ' &&
+            next_tile != 'D' && next_tile != 'F' && next_tile != 'G' && 
+            next_tile != 'S' && next_tile != 'U') {
+            map->player_x = new_x;
+            map->player_y = new_y;
+            int dx = new_x - map->player_x;
+            int dy = new_y - map->player_y;
+            int second_x = new_x + dx;
+            int second_y = new_y + dy;
+            if (second_x >= 0 && second_x < NUMCOLS && 
+                second_y >= 0 && second_y < NUMLINES) {
+                char second_tile = current->tiles[second_y][second_x];
+                if (second_tile != '|' && second_tile != '_' && 
+                    second_tile != ' ' && second_tile != 'D' && 
+                    second_tile != 'F' && second_tile != 'G' && 
+                    second_tile != 'S' && second_tile != 'U') {
+                    map->player_x = second_x;
+                    map->player_y = second_y;
+                }
             }
         }
     }
     update_monsters(map);
 }
-int main() {
+int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
     initscr();
     noecho();
     cbreak();
     keypad(stdscr, TRUE);
     load_username();
+    init_database();
     getmaxyx(stdscr, NUMLINES, NUMCOLS);
     NUMLINES -= 4;
     curs_set(0);
@@ -2740,12 +4199,25 @@ int main() {
     }
     srand(time(NULL));
     Map *map = create_map();
-    if (map == NULL) {
-        endwin();
-        fprintf(stderr, "Failed to create map\n");
-        return 1;
+    bool resume_wait = (argc > 1 && strcmp(argv[1], "resume_wait") == 0);
+    if (!resume_wait) {
+        map = create_map();
+        if (map == NULL) {
+            endwin();
+            fprintf(stderr, "Failed to create map\n");
+            return 1;
+        }
+        generate_map(map);
+    } else {
+        map = create_map();
+        if (map == NULL) {
+            endwin();
+            fprintf(stderr, "Failed to create map\n");
+            return 1;
+        }
+        set_message(map, "Press 'L' to load your saved game");
     }
-    generate_map(map);
+    //play_background_music("1");
     while (1) {
         clear();
         update_visibility(map);
@@ -2810,6 +4282,16 @@ int main() {
                             case '|': case '_': color = 1; break;
                             case '.': color = 4; break;
                             case '#': color = 2; break;
+                            case 'B': 
+                                attron(COLOR_PAIR(3));  
+                                mvprintw(y + 4, x + 1, "○");
+                                attroff(COLOR_PAIR(3));
+                                continue;
+                            case 'C': 
+                                attron(COLOR_PAIR(5));  
+                                mvprintw(y + 4, x + 1, "○");
+                                attroff(COLOR_PAIR(5));
+                                continue;
                             case '*':
                                 color = 5;  
                                 attron(COLOR_PAIR(color));
@@ -2952,8 +4434,26 @@ int main() {
         attroff(COLOR_PAIR(2));
         refresh();
         int ch = getch();
+        if (current->in_fighting_room) {
+            update_arena_monsters(map);
+        }
         if (++map->hunger_timer >= 100) {  
             map->hunger_timer = 0;
+            if (map->crimson_flask > 0) {
+                map->crimson_flask--;
+                map->normal_food++;
+                set_message(map, "A Flask of Crimson Tears has lost its magic and turned into normal food!");
+            }
+            else if (map->cerulean_flask > 0) {
+                map->cerulean_flask--;
+                map->normal_food++;
+                set_message(map, "A Flask of Cerulean Tears has lost its magic and turned into normal food!");
+            }
+            else if (map->normal_food > map->rotten_food) {
+                map->rotten_food++;
+                set_message(map, "Some of your food has gone rotten!");
+            }
+
             if (map->hunger > 0) {
                 map->hunger--;
             }
@@ -2974,23 +4474,72 @@ int main() {
                         break;
                     }
                 }
-                if (!monster_nearby && map->health < 25) {
-                    map->health++;
-                    if (map->message_timer <= 0) { 
-                        set_message(map, "You feel your health returning...");
+                if (map->hunger > 50 && map->health < 25) {
+                    if (!monster_nearby) {
+                        int regen_amount = map->health_regen_doubled ? 2 : 1;
+                        int new_health = map->health + regen_amount;
+                        if (new_health > 30) new_health = 30;
+                        
+                        if (new_health > map->health) {
+                            map->health = new_health;
+                            if (map->message_timer <= 0) {
+                                if (map->health_regen_doubled) {
+                                    set_message(map, "Your health is regenerating quickly!");
+                                } else {
+                                    set_message(map, "You feel your health returning...");
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
-        if (ch == 'q' || ch == 'Q'){
+        if (ch == 'q' || ch == 'Q') {
+            //system("pkill mpg123 2>/dev/null");
+            if (save_game_json(map, "savegame.json")) {
+                set_message(map, "Game saved successfully!");
+            }
             save_user_data(map);
+            save_to_database(map);
             free_map(map);
             clear();
             refresh();
             endwin();
             curs_set(1);
             system("clear");
-            exit(0);
+            char *args[] = {"./Menu", NULL};
+            execv("./Menu", args);
+            exit(1);
+        }
+        if (ch == 'k' || ch == 'K') {
+            if (save_game_json(map, "savegame.json")) {
+                set_message(map, "Game saved successfully!");
+                save_to_database(map);
+            } else {
+                set_message(map, "Failed to save game!");
+            }
+        }
+        else if (ch == 'L' || ch == 'l') {
+            Map *loaded_map = load_game_json("savegame.json");
+            if (loaded_map) {
+                free_map(map);
+                map = loaded_map;
+                Level *current = &map->levels[map->current_level - 1];
+                for (int r = 0; r < current->num_rooms; r++) {
+                    Room *room = &current->rooms[r];
+                    for (int y = room->pos.y; y < room->pos.y + room->max.y; y++) {
+                        for (int x = room->pos.x; x < room->pos.x + room->max.x; x++) {
+                            if (current->explored[y][x]) {
+                                current->visible_tiles[y][x] = current->tiles[y][x];
+                            }
+                        }
+                    }
+                }
+                update_visibility(map);
+                set_message(map, "Game loaded successfully!");
+            } else {
+                set_message(map, "Failed to load save game!");
+            }
         }
         if (ch == 'r' || ch == 'R') {
             generate_map(map);
@@ -3001,6 +4550,7 @@ int main() {
             handle_input(map, ch);
         }
         if (map->health <= 0) {
+            //system("pkill mpg123 2>/dev/null");
             show_lose_screen(map);
             free_map(map);
             clear();
